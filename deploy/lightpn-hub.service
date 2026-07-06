@@ -9,8 +9,9 @@ ExecStart=/usr/local/bin/lightpn-hub --data-dir /var/lib/lightpn/hub
 Restart=always
 RestartSec=3
 
-# Hardening
-DynamicUser=yes
+# Hardening. Runs as root so the data dir is shared cleanly with the
+# `lightpn-hub admin set-password` CLI (run via sudo); ProtectSystem
+# still confines writes to the state directory.
 StateDirectory=lightpn/hub
 NoNewPrivileges=yes
 ProtectSystem=strict
