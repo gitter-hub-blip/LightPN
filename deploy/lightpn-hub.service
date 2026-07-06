@@ -1,0 +1,21 @@
+[Unit]
+Description=LightPN hub (control plane + admin panel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lightpn-hub --data-dir /var/lib/lightpn/hub
+Restart=always
+RestartSec=3
+
+# Hardening
+DynamicUser=yes
+StateDirectory=lightpn/hub
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

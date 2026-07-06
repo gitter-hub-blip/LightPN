@@ -1,0 +1,24 @@
+[Unit]
+Description=LightPN agent (edge node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lightpn-agent --data-dir /var/lib/lightpn/identity
+Restart=always
+RestartSec=3
+# The agent needs CAP_NET_ADMIN to manage the WireGuard device.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StateDirectory=lightpn
+
+# Exit code 0 after a hub-side kick means "do not restart".
+RestartPreventExitStatus=0
+
+[Install]
+WantedBy=multi-user.target
