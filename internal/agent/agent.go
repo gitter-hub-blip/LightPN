@@ -43,6 +43,8 @@ type Agent struct {
 	SocksListen string
 	SocksPort   int
 
+	socksOnce sync.Once
+
 	connMu sync.Mutex
 	conn   net.Conn
 }
@@ -52,15 +54,6 @@ type Agent struct {
 // convergence path.
 func (a *Agent) Run() error {
 	warmupCPU()
-	// The exit SOCKS listener lives for the whole agent lifetime; upstream
-	// switching happens via peer events on the control channel.
-	if a.Exit != nil && a.SocksListen != "" {
-		go func() {
-			if err := a.Exit.Serve(context.Background(), a.SocksListen); err != nil {
-				a.Log.Error("exit SOCKS server stopped", "err", err)
-			}
-		}()
-	}
 	backoff := time.Second
 	for {
 		err := a.session()
@@ -104,6 +97,20 @@ func (a *Agent) session() error {
 	pubkey, port, err := a.WG.Init(a.ID.OverlayIP, a.ID.OverlayCIDR, a.WGPort)
 	if err != nil {
 		return fmt.Errorf("wireguard init: %w", err)
+	}
+
+	// Start the exit SOCKS listener only after the overlay device exists,
+	// so a bind to the overlay IP succeeds. It lives for the whole process
+	// lifetime; the overlay IP is stable across reconnects, so upstream
+	// switching (not re-binding) handles subsequent peer events.
+	if a.Exit != nil && a.SocksListen != "" {
+		a.socksOnce.Do(func() {
+			go func() {
+				if err := a.Exit.Serve(context.Background(), a.SocksListen); err != nil {
+					a.Log.Error("exit SOCKS server stopped", "err", err)
+				}
+			}()
+		})
 	}
 
 	if err := a.register(conn, pubkey, port); err != nil {

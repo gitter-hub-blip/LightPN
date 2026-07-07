@@ -154,9 +154,22 @@ func (directDialer) Dial(network, addr string) (net.Conn, error) {
 	return net.DialTimeout(network, addr, 15*time.Second)
 }
 
-// Serve runs the SOCKS5 listener until ctx is done.
+// Serve runs the SOCKS5 listener until ctx is done. The initial bind is
+// retried briefly: when binding to the overlay IP, the kernel may not have
+// finished applying the address the instant WG.Init returns.
 func (ec *ExitController) Serve(ctx context.Context, listenAddr string) error {
-	ln, err := net.Listen("tcp", listenAddr)
+	var ln net.Listener
+	var err error
+	for i := 0; i < 50; i++ {
+		if ln, err = net.Listen("tcp", listenAddr); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 	if err != nil {
 		return err
 	}

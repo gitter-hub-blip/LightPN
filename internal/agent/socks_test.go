@@ -129,6 +129,37 @@ func TestSocksChainedThroughExit(t *testing.T) {
 	}
 }
 
+// TestServeRetriesInitialBind: Serve must tolerate the target address not
+// being bindable yet (overlay IP applied a moment after WG.Init), binding
+// as soon as it appears. Regression guard for the exit-SOCKS start-order
+// bug where the listener died with "cannot assign requested address".
+func TestServeRetriesInitialBind(t *testing.T) {
+	// Reserve a port, then free it just after Serve has started retrying,
+	// so the first bind attempt is against a moving target.
+	hold, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := hold.Addr().String()
+
+	ec, _ := NewExitController(quietLog(), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- ec.Serve(ctx, addr) }()
+
+	// Let Serve fail its first attempts, then release the port.
+	time.Sleep(250 * time.Millisecond)
+	hold.Close()
+
+	// It should now bind and accept a connection.
+	waitDial(t, addr)
+	cancel()
+	if err := <-serveErr; err != nil && err != context.Canceled {
+		t.Fatalf("Serve returned %v", err)
+	}
+}
+
 // TestExitOverrideIgnoresHub: --exit-via pins the upstream; hub-driven
 // SetLinkExit/Reconcile must not change it.
 func TestExitOverrideIgnoresHub(t *testing.T) {
