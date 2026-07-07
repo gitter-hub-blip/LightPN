@@ -40,9 +40,10 @@ type Hub struct {
 // wgIdent is a node's last-registered ephemeral WG material plus the
 // endpoint IP observed from its control connection (invariant 5).
 type wgIdent struct {
-	pubkey string
-	port   int
-	ip     string
+	pubkey    string
+	port      int
+	ip        string
+	socksPort int // exit SOCKS5 port bound to the node's overlay IP (0 = off)
 }
 
 func (w wgIdent) endpoint() string { return fmt.Sprintf("%s:%d", w.ip, w.port) }
@@ -183,6 +184,7 @@ type SessionInfo struct {
 	AgentVersion string
 	LastHB       int64
 	WGPeers      []proto.WGPeerStatus
+	ExitCapable  bool // agent advertised an exit SOCKS port
 }
 
 func (h *Hub) Session(id string) (SessionInfo, bool) {
@@ -195,6 +197,7 @@ func (h *Hub) Session(id string) (SessionInfo, bool) {
 	info := SessionInfo{AgentVersion: s.agentVersion, LastHB: s.lastHB, WGPeers: s.hbWG}
 	if w, ok := h.lastWG[id]; ok {
 		info.Endpoint = w.endpoint()
+		info.ExitCapable = w.socksPort > 0
 	}
 	return info, true
 }
@@ -247,7 +250,7 @@ func (h *Hub) peerSpecLocked(l *Link, peerID string, w wgIdent) (proto.PeerSpec,
 	if err != nil {
 		return proto.PeerSpec{}, err
 	}
-	return proto.PeerSpec{
+	spec := proto.PeerSpec{
 		LinkID:     l.ID,
 		PeerNodeID: peerID,
 		PeerName:   peer.Name,
@@ -255,7 +258,15 @@ func (h *Hub) peerSpecLocked(l *Link, peerID string, w wgIdent) (proto.PeerSpec,
 		Endpoint:   w.endpoint(),
 		AllowedIPs: []string{peer.OverlayIP + "/32"},
 		KeepaliveS: h.Cfg.KeepaliveS,
-	}, nil
+	}
+	// The receiver of this spec is the other end of the link. If the link
+	// designates `peerID` as the exit node and the peer actually runs an
+	// exit SOCKS, tell the receiver to egress through it.
+	if l.ExitNode == peerID && peerID != l.Other(peerID) && w.socksPort > 0 {
+		spec.Exit = true
+		spec.ExitAddr = fmt.Sprintf("%s:%d", peer.OverlayIP, w.socksPort)
+	}
+	return spec, nil
 }
 
 // peerSide returns which ack flag nodeID owns on link l ("a" or "b").
@@ -330,6 +341,24 @@ func (h *Hub) CreateLink(a, b string) (*Link, error) {
 		return nil, err
 	}
 	h.pushLink(l)
+	h.publish("link_status", map[string]any{"link_id": l.ID, "status": h.LinkStatus(l)})
+	return l, nil
+}
+
+// SetLinkExit designates (exitNode = A or B) or clears (exitNode = "") the
+// internet egress for a link, then re-pushes the pair so the non-exit side
+// updates its exit SOCKS upstream (peer_update carries Exit/ExitAddr).
+func (h *Hub) SetLinkExit(id, exitNode string) (*Link, error) {
+	l, err := h.Store.SetLinkExit(id, exitNode)
+	if err != nil {
+		return nil, err
+	}
+	h.mu.Lock()
+	if h.links[l.ID] == nil {
+		h.links[l.ID] = &linkRT{}
+	}
+	h.pushPairLocked(l, proto.TypePeerUpdate)
+	h.mu.Unlock()
 	h.publish("link_status", map[string]any{"link_id": l.ID, "status": h.LinkStatus(l)})
 	return l, nil
 }

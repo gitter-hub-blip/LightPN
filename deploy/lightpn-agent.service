@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# To let this node act as (or use) an exit, append: --socks-port 1080
+# It binds the exit SOCKS5 on the overlay IP and advertises it to the hub.
 ExecStart=/usr/local/bin/lightpn-agent --data-dir /var/lib/lightpn/identity
 Restart=always
 RestartSec=3

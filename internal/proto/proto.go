@@ -122,6 +122,10 @@ type RegisterData struct {
 	WGPort       int    `json:"wg_port"`
 	AgentVersion string `json:"agent_version"`
 	OS           string `json:"os"`
+	// SocksPort is the agent's local exit SOCKS5 port (0 = disabled). It
+	// is bound to the overlay IP so other nodes may egress through it; the
+	// hub records it to build ExitAddr for peers that exit via this node.
+	SocksPort int `json:"socks_port,omitempty"`
 }
 
 type RegisterAckData struct {
@@ -140,6 +144,11 @@ type PeerSpec struct {
 	Endpoint   string   `json:"endpoint"`
 	AllowedIPs []string `json:"allowed_ips"`
 	KeepaliveS int      `json:"keepalive_s"`
+	// Exit, when true, tells the receiving agent to route its local exit
+	// SOCKS5 upstream through this peer (i.e. egress via this peer to the
+	// internet). ExitAddr is the peer's overlay SOCKS address to dial.
+	Exit     bool   `json:"exit,omitempty"`
+	ExitAddr string `json:"exit_addr,omitempty"`
 }
 
 type PeerRemoveData struct {

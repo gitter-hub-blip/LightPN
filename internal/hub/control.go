@@ -336,8 +336,8 @@ func (h *Hub) handleRegister(s *session, env *proto.Envelope) {
 	}
 	remoteIP, _, _ := net.SplitHostPort(s.conn.RemoteAddr().String())
 	// Invariant 5: endpoint IP comes from the control connection source
-	// address; the agent may only declare its WG listen port.
-	ident := wgIdent{pubkey: d.WGPubkey, port: d.WGPort, ip: remoteIP}
+	// address; the agent may only declare its WG listen and exit SOCKS ports.
+	ident := wgIdent{pubkey: d.WGPubkey, port: d.WGPort, ip: remoteIP, socksPort: d.SocksPort}
 
 	links, err := h.Store.LinksOfNode(s.node.ID)
 	if err != nil {

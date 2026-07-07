@@ -54,12 +54,13 @@ func startHub(t *testing.T) *Hub {
 
 // fakeAgent drives the wire protocol like a real agent.
 type fakeAgent struct {
-	t       *testing.T
-	hub     *Hub
-	nodeID  string
-	keyPEM  string
-	certPEM string
-	caPEM   string
+	t         *testing.T
+	hub       *Hub
+	nodeID    string
+	keyPEM    string
+	certPEM   string
+	caPEM     string
+	socksPort int // reported in register (exit SOCKS advertisement)
 
 	conn net.Conn
 
@@ -131,6 +132,7 @@ func (f *fakeAgent) connect(pubkey string, port int) proto.RegisterAckData {
 
 	env, _ := proto.NewEnvelope(proto.TypeRegister, NewULID(), proto.RegisterData{
 		WGPubkey: pubkey, WGPort: port, AgentVersion: "test", OS: "test",
+		SocksPort: f.socksPort,
 	})
 	if err := proto.WriteFrame(conn, env); err != nil {
 		f.t.Fatal(err)
@@ -411,6 +413,86 @@ func TestTokenReuseRejected(t *testing.T) {
 	typ, err = enrollOnce()
 	if err != nil || typ != proto.TypeError {
 		t.Fatalf("second enroll: %s %v, want error", typ, err)
+	}
+}
+
+// TestLinkExitPushesExitSpec: designating B as a link's exit must push
+// peer_update to A carrying Exit=true and ExitAddr = B_overlay:B_socks,
+// and only to A (B stays a plain peer). Clearing it reverts A.
+func TestLinkExitPushesExitSpec(t *testing.T) {
+	h := startHub(t)
+	a := enrollAgent(t, h, "edge-a")
+	b := enrollAgent(t, h, "edge-b")
+	b.socksPort = 1080 // B advertises an exit SOCKS
+	a.connect("PUBKEY_A_1", 51820)
+	b.connect("PUBKEY_B_1", 51820)
+	l, err := h.CreateLink(a.nodeID, b.nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.waitPush(proto.TypePeerAdd, 3*time.Second)
+	b.waitPush(proto.TypePeerAdd, 3*time.Second)
+	a.clearPushes()
+	b.clearPushes()
+
+	// Set B as the exit node.
+	if _, err := h.SetLinkExit(l.ID, b.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	pu := a.waitPush(proto.TypePeerUpdate, 3*time.Second)
+	var specA proto.PeerSpec
+	json.Unmarshal(pu.Data, &specA)
+	if !specA.Exit {
+		t.Fatalf("A's spec should have Exit=true: %+v", specA)
+	}
+	bNode, _ := h.Store.GetNode(b.nodeID)
+	wantAddr := bNode.OverlayIP + ":1080"
+	if specA.ExitAddr != wantAddr {
+		t.Fatalf("ExitAddr = %q, want %q", specA.ExitAddr, wantAddr)
+	}
+	// B must NOT be told to exit via A.
+	puB := b.waitPush(proto.TypePeerUpdate, 3*time.Second)
+	var specB proto.PeerSpec
+	json.Unmarshal(puB.Data, &specB)
+	if specB.Exit {
+		t.Fatalf("B's spec should not have Exit set: %+v", specB)
+	}
+
+	// Clearing the exit reverts A to Exit=false.
+	a.clearPushes()
+	if _, err := h.SetLinkExit(l.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	pu2 := a.waitPush(proto.TypePeerUpdate, 3*time.Second)
+	var specA2 proto.PeerSpec
+	json.Unmarshal(pu2.Data, &specA2)
+	if specA2.Exit {
+		t.Fatalf("after clear, A's spec should have Exit=false: %+v", specA2)
+	}
+}
+
+// TestExitRequiresSocksAdvertisement: if the designated exit node never
+// advertised a SOCKS port, no Exit flag is sent (fail safe to direct).
+func TestExitRequiresSocksAdvertisement(t *testing.T) {
+	h := startHub(t)
+	a := enrollAgent(t, h, "edge-a")
+	b := enrollAgent(t, h, "edge-b")
+	// B does NOT set socksPort.
+	a.connect("PUBKEY_A_1", 51820)
+	b.connect("PUBKEY_B_1", 51820)
+	l, _ := h.CreateLink(a.nodeID, b.nodeID)
+	a.waitPush(proto.TypePeerAdd, 3*time.Second)
+	b.waitPush(proto.TypePeerAdd, 3*time.Second)
+	a.clearPushes()
+
+	if _, err := h.SetLinkExit(l.ID, b.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	pu := a.waitPush(proto.TypePeerUpdate, 3*time.Second)
+	var spec proto.PeerSpec
+	json.Unmarshal(pu.Data, &spec)
+	if spec.Exit {
+		t.Fatalf("exit must not activate without SOCKS advertisement: %+v", spec)
 	}
 }
 

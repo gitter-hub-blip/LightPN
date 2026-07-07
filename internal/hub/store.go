@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS links (
   a           TEXT NOT NULL REFERENCES nodes(id),
   b           TEXT NOT NULL REFERENCES nodes(id),
   created_at  INTEGER NOT NULL,
+  exit_node   TEXT NOT NULL DEFAULT '',   -- '' = no exit; else the node that egresses to the internet
   UNIQUE(a, b)
 );
 CREATE TABLE IF NOT EXISTS tokens (
@@ -70,7 +71,38 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
+}
+
+// migrate applies additive schema changes for databases created by an
+// earlier version. Each step is idempotent.
+func migrate(db *sql.DB) error {
+	// links.exit_node (added in the exit-node feature).
+	if !hasColumn(db, "links", "exit_node") {
+		if _, err := db.Exec(`ALTER TABLE links ADD COLUMN exit_node TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, col string) bool {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if rows.Scan(&name) == nil && name == col {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -287,6 +319,9 @@ type Link struct {
 	ID        string
 	A, B      string
 	CreatedAt int64
+	// ExitNode is empty for a plain link, or the node ID (== A or B) that
+	// serves as the internet egress for the other end.
+	ExitNode string
 }
 
 // CreateLink stores a link with (a,b) sorted for dedup.
@@ -297,16 +332,33 @@ func (s *Store) CreateLink(a, b string, now int64) (*Link, error) {
 	pair := []string{a, b}
 	sort.Strings(pair)
 	l := &Link{ID: NewULID(), A: pair[0], B: pair[1], CreatedAt: now}
-	_, err := s.db.Exec(`INSERT INTO links (id,a,b,created_at) VALUES (?,?,?,?)`, l.ID, l.A, l.B, l.CreatedAt)
+	_, err := s.db.Exec(`INSERT INTO links (id,a,b,created_at,exit_node) VALUES (?,?,?,?,'')`, l.ID, l.A, l.B, l.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return l, nil
 }
 
+// SetLinkExit sets (or clears, with exitNode="") which end egresses to the
+// internet for a link. exitNode must be one of the link's endpoints.
+func (s *Store) SetLinkExit(id, exitNode string) (*Link, error) {
+	l, err := s.GetLink(id)
+	if err != nil {
+		return nil, err
+	}
+	if exitNode != "" && exitNode != l.A && exitNode != l.B {
+		return nil, errors.New("exit node must be one of the link's endpoints")
+	}
+	if _, err := s.db.Exec(`UPDATE links SET exit_node=? WHERE id=?`, exitNode, id); err != nil {
+		return nil, err
+	}
+	l.ExitNode = exitNode
+	return l, nil
+}
+
 func (s *Store) GetLink(id string) (*Link, error) {
 	var l Link
-	err := s.db.QueryRow(`SELECT id,a,b,created_at FROM links WHERE id=?`, id).Scan(&l.ID, &l.A, &l.B, &l.CreatedAt)
+	err := s.db.QueryRow(`SELECT id,a,b,created_at,exit_node FROM links WHERE id=?`, id).Scan(&l.ID, &l.A, &l.B, &l.CreatedAt, &l.ExitNode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -328,7 +380,7 @@ func (s *Store) DeleteLink(id string) error {
 }
 
 func (s *Store) ListLinks() ([]*Link, error) {
-	rows, err := s.db.Query(`SELECT id,a,b,created_at FROM links ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT id,a,b,created_at,exit_node FROM links ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +388,7 @@ func (s *Store) ListLinks() ([]*Link, error) {
 	var out []*Link
 	for rows.Next() {
 		var l Link
-		if err := rows.Scan(&l.ID, &l.A, &l.B, &l.CreatedAt); err != nil {
+		if err := rows.Scan(&l.ID, &l.A, &l.B, &l.CreatedAt, &l.ExitNode); err != nil {
 			return nil, err
 		}
 		out = append(out, &l)
@@ -345,7 +397,7 @@ func (s *Store) ListLinks() ([]*Link, error) {
 }
 
 func (s *Store) LinksOfNode(id string) ([]*Link, error) {
-	rows, err := s.db.Query(`SELECT id,a,b,created_at FROM links WHERE a=? OR b=?`, id, id)
+	rows, err := s.db.Query(`SELECT id,a,b,created_at,exit_node FROM links WHERE a=? OR b=?`, id, id)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +405,7 @@ func (s *Store) LinksOfNode(id string) ([]*Link, error) {
 	var out []*Link
 	for rows.Next() {
 		var l Link
-		if err := rows.Scan(&l.ID, &l.A, &l.B, &l.CreatedAt); err != nil {
+		if err := rows.Scan(&l.ID, &l.A, &l.B, &l.CreatedAt, &l.ExitNode); err != nil {
 			return nil, err
 		}
 		out = append(out, &l)

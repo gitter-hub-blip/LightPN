@@ -75,6 +75,30 @@ sudo systemctl enable --now lightpn-agent
 
 面板「连接」页,在矩阵中点击两节点交叉处的 ＋ 即可;两侧 overlay IP(默认 `100.100.0.0/24` 段)随即互通。link 状态 `degraded` 通常意味着 WG UDP 端口未放行。
 
+## 出口节点(经对端出网)
+
+典型用法:边缘节点 A 作为翻墙入口(承载 Reality/VLESS 等协议),平时直连公网;一旦 hub 把 A↔B 撮合并指定 B 为出口,A 的出站流量就改为经 LightPN 隧道从 B 出网 —— 链路变成 `客户端 —(Reality)→ A —(LightPN)→ B → 公网`。
+
+实现方式是 agent 内置一个**可切换上游的本地 SOCKS5**:翻墙软件的出站永远指向它,由 agent 依 hub 的撮合状态决定这个 SOCKS 直连还是链式转发到 B 的 overlay SOCKS。因为上游只认 B 的 **overlay 地址**(按 NodeID 稳定),底层 WG 换钥/重启的自愈对它透明,翻墙软件配置一次写死即可。
+
+**每台要参与出口的机器都开启 agent 的 SOCKS**(出口节点必须开,入口节点开了才能把自己的翻墙出站接进来):
+
+```sh
+# ExecStart 追加,或命令行运行:
+#   --socks-port 1080   在 overlay IP 上监听 1080,并向 hub 通告"我可作为出口"
+lightpn-agent --data-dir /var/lib/lightpn/identity --socks-port 1080
+```
+
+- SOCKS 绑定在节点的 **overlay IP**(如 `100.100.0.3:1080`),不出现在公网接口。
+- 入口机上的翻墙软件把出站指向本机 overlay 地址(如 `100.100.0.2:1080`)。
+- overlay 内 SOCKS 明文流量本就在 WG 隧道里(已加密 + 双向 mTLS),不额外引入暴露面。
+
+**切换出口**:面板「连接」页每条 link 的「出口」列选择方向(`A 经 B 出网` / `B 经 A 出网` / 直连);只有通告了 SOCKS 的节点才会作为可选出口出现。选定后 hub 向入口侧推 `peer_update`,agent 立即把 SOCKS 上游切到出口节点;改回「直连」即恢复。link 删除或出口节点掉线,入口自动回退直连。
+
+**手动/测试**:不依赖 hub 时可用 `--exit-via 100.100.0.3:1080` 直接钉住上游(此时忽略 hub 的出口指令)。
+
+> 说明:数据面出口依赖内核 WireGuard,仅 Linux 生效;非 Linux 平台 agent 用内存桩,SOCKS 切换逻辑仍可跑通用于开发。
+
 ## 运维要点
 
 | 事项 | 说明 |

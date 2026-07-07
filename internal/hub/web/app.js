@@ -308,10 +308,28 @@ function linksView() {
   } else {
     matrix = `<div class="empty">至少需要两个节点才能建立连接。</div>`;
   }
+  const exitCapable = id => {
+    const n = state.nodes.find(n => n.id === id);
+    return n && n.exit_capable;
+  };
+  const exitCell = l => {
+    // Options: direct (no exit) / A 经 B 出网 / B 经 A 出网, only offering
+    // a direction whose exit node advertises a SOCKS port.
+    const opts = [`<option value="">直连(各自出网)</option>`];
+    if (exitCapable(l.b)) opts.push(`<option value="${l.b}" ${l.exit_node === l.b ? "selected" : ""}>${esc(nodeName(l.a))} 经 ${esc(nodeName(l.b))} 出网</option>`);
+    if (exitCapable(l.a)) opts.push(`<option value="${l.a}" ${l.exit_node === l.a ? "selected" : ""}>${esc(nodeName(l.b))} 经 ${esc(nodeName(l.a))} 出网</option>`);
+    if (opts.length === 1) {
+      return l.exit_node
+        ? `<span class="pill degraded">出口节点已离线</span>`
+        : `<span class="hint">无节点开启出口 SOCKS</span>`;
+    }
+    return `<select data-exit-link="${l.id}">${opts.join("")}</select>`;
+  };
   const rows = state.links.map(l => `
     <tr>
       <td>${esc(nodeName(l.a))} ⇄ ${esc(nodeName(l.b))}</td>
       <td><span class="pill ${l.status}">${l.status}</span>${l.status === "degraded" ? `<div class="hint">双方已下发但无握手 —— 检查 WG UDP 端口是否放行</div>` : ""}</td>
+      <td>${exitCell(l)}</td>
       <td class="mono">${l.last_handshake ? fmtAgo(l.last_handshake) : "–"}</td>
       <td class="mono">↓${fmtRate(l.rx_rate)} ↑${fmtRate(l.tx_rate)}</td>
       <td><button class="danger" data-del-link="${l.id}">删除</button></td>
@@ -321,7 +339,7 @@ function linksView() {
     ${matrix}
     <div class="section-title">Link 列表</div>
     ${state.links.length ? `<table>
-      <tr><th>节点对</th><th>状态</th><th>最近握手</th><th>速率</th><th></th></tr>${rows}</table>`
+      <tr><th>节点对</th><th>状态</th><th>出口</th><th>最近握手</th><th>速率</th><th></th></tr>${rows}</table>`
       : `<div class="empty">还没有 link。在上方矩阵中点击 ＋ 创建。</div>`}
   `);
 }
@@ -491,6 +509,15 @@ function bindLinks() {
       try { await api("DELETE", `/api/links/${el.dataset.delLink}`); toast("已删除"); await refreshSnapshots(); render(); }
       catch (e) { toast(e.message); }
     });
+  });
+  document.querySelectorAll("[data-exit-link]").forEach(el => {
+    el.onchange = async () => {
+      try {
+        await api("PATCH", `/api/links/${el.dataset.exitLink}`, { exit_node: el.value });
+        toast(el.value ? "出口已设置" : "已恢复直连");
+        await refreshSnapshots(); render();
+      } catch (e) { toast(e.message); render(); }
+    };
   });
 }
 

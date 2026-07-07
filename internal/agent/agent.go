@@ -4,6 +4,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -35,6 +36,13 @@ type Agent struct {
 
 	HeartbeatPeriod time.Duration
 
+	// Exit, when non-nil, is the local exit SOCKS5 proxy. SocksListen is
+	// the local bind address; SocksPort is the overlay-reachable port
+	// reported to the hub so other nodes may egress through this one.
+	Exit        *ExitController
+	SocksListen string
+	SocksPort   int
+
 	connMu sync.Mutex
 	conn   net.Conn
 }
@@ -44,6 +52,15 @@ type Agent struct {
 // convergence path.
 func (a *Agent) Run() error {
 	warmupCPU()
+	// The exit SOCKS listener lives for the whole agent lifetime; upstream
+	// switching happens via peer events on the control channel.
+	if a.Exit != nil && a.SocksListen != "" {
+		go func() {
+			if err := a.Exit.Serve(context.Background(), a.SocksListen); err != nil {
+				a.Log.Error("exit SOCKS server stopped", "err", err)
+			}
+		}()
+	}
 	backoff := time.Second
 	for {
 		err := a.session()
@@ -121,6 +138,7 @@ func (a *Agent) register(conn net.Conn, pubkey string, port int) error {
 		WGPort:       port,
 		AgentVersion: Version,
 		OS:           runtime.GOOS + "/" + runtime.GOARCH,
+		SocksPort:    a.SocksPort,
 	})
 	if err != nil {
 		return err
@@ -152,6 +170,15 @@ func (a *Agent) register(conn net.Conn, pubkey string, port int) error {
 	}
 	if err := a.WG.Reconcile(ack.PeersExpected); err != nil {
 		return fmt.Errorf("reconcile peers: %w", err)
+	}
+	if a.Exit != nil {
+		exits := map[string]string{}
+		for _, s := range ack.PeersExpected {
+			if s.Exit && s.ExitAddr != "" {
+				exits[s.LinkID] = s.ExitAddr
+			}
+		}
+		a.Exit.Reconcile(exits)
 	}
 	a.Log.Info("reconciled peers", "count", len(ack.PeersExpected))
 	return nil
@@ -211,7 +238,16 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 		} else {
 			err = a.WG.UpdatePeer(spec)
 		}
-		a.Log.Info("peer applied", "type", env.Type, "peer", spec.PeerName, "endpoint", spec.Endpoint, "err", err)
+		// Track the exit designation carried by this peer (empty ExitAddr
+		// or Exit=false clears it for this link).
+		if a.Exit != nil && err == nil {
+			if spec.Exit && spec.ExitAddr != "" {
+				a.Exit.SetLinkExit(spec.LinkID, spec.ExitAddr)
+			} else {
+				a.Exit.SetLinkExit(spec.LinkID, "")
+			}
+		}
+		a.Log.Info("peer applied", "type", env.Type, "peer", spec.PeerName, "endpoint", spec.Endpoint, "exit", spec.Exit, "err", err)
 		return a.ack(conn, env.ID, err)
 
 	case proto.TypePeerRemove:
@@ -220,6 +256,9 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 			return a.ack(conn, env.ID, err)
 		}
 		err := a.WG.RemovePeer(d.WGPubkey)
+		if a.Exit != nil {
+			a.Exit.ClearByLink(d.LinkID)
+		}
 		a.Log.Info("peer removed", "link", d.LinkID, "err", err)
 		return a.ack(conn, env.ID, err)
 

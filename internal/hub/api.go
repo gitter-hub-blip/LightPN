@@ -119,6 +119,7 @@ func (h *Hub) ServeAPI(stop <-chan struct{}) error {
 	mux.Handle("DELETE /api/tokens/{id}", a.auth(a.deleteToken))
 	mux.Handle("GET /api/links", a.auth(a.listLinks))
 	mux.Handle("POST /api/links", a.auth(a.createLink))
+	mux.Handle("PATCH /api/links/{id}", a.auth(a.setLinkExit))
 	mux.Handle("DELETE /api/links/{id}", a.auth(a.deleteLink))
 	mux.Handle("GET /api/ws", a.auth(a.ws))
 	mux.Handle("GET /api/session", a.auth(func(w http.ResponseWriter, r *http.Request) {
@@ -231,14 +232,15 @@ func (a *apiServer) logout(w http.ResponseWriter, r *http.Request) {
 // ---- nodes ----
 
 type nodeJSON struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	OverlayIP    string   `json:"overlay_ip"`
-	Status       string   `json:"status"`
-	Endpoint     string   `json:"endpoint"`
-	AgentVersion string   `json:"agent_version"`
-	LastSeen     int64    `json:"last_seen"`
-	SysSummary   *Sample  `json:"sys_summary,omitempty"`
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	OverlayIP    string  `json:"overlay_ip"`
+	Status       string  `json:"status"`
+	Endpoint     string  `json:"endpoint"`
+	AgentVersion string  `json:"agent_version"`
+	LastSeen     int64   `json:"last_seen"`
+	ExitCapable  bool    `json:"exit_capable"`
+	SysSummary   *Sample `json:"sys_summary,omitempty"`
 }
 
 func (a *apiServer) nodeJSON(n *Node) nodeJSON {
@@ -250,6 +252,7 @@ func (a *apiServer) nodeJSON(n *Node) nodeJSON {
 		out.Endpoint = info.Endpoint
 		out.AgentVersion = info.AgentVersion
 		out.LastSeen = info.LastHB
+		out.ExitCapable = info.ExitCapable
 	}
 	if s, ok := a.hub.Metrics.Latest(n.ID); ok {
 		out.SysSummary = &s
@@ -415,12 +418,34 @@ func (a *apiServer) listLinks(w http.ResponseWriter, r *http.Request) {
 			"id": l.ID, "a": l.A, "b": l.B,
 			"status":         a.hub.LinkStatus(l),
 			"created_at":     l.CreatedAt,
+			"exit_node":      l.ExitNode,
 			"last_handshake": hs,
 			"rx_rate":        rx,
 			"tx_rate":        tx,
 		})
 	}
 	writeJSON(w, out)
+}
+
+// setLinkExit handles PATCH /api/links/{id} { "exit_node": "<nodeID>|"" }.
+func (a *apiServer) setLinkExit(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ExitNode string `json:"exit_node"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	l, err := a.hub.SetLinkExit(r.PathValue("id"), body.ExitNode)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpErr(w, http.StatusNotFound, "not found")
+			return
+		}
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"id": l.ID, "exit_node": l.ExitNode, "status": a.hub.LinkStatus(l)})
 }
 
 func (a *apiServer) createLink(w http.ResponseWriter, r *http.Request) {
