@@ -20,7 +20,7 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin
 
 ## 脚本化安装(推荐)
 
-[deploy/lightpn-hub.sh](deploy/lightpn-hub.sh) 与 [deploy/lightpn-agent.sh](deploy/lightpn-agent.sh) 内嵌了 systemd 单元,把「二进制 + 同名脚本」两个文件传到服务器即可完成安装/启动/卸载。所有文件(二进制/配置/数据)集中安装在**运行 sudo 的用户主目录**下的 `~/lightpn`(hub 数据在 `~/lightpn/hub-data`,agent 身份在 `~/lightpn/identity`),只有 systemd 单元放在 `/etc/systemd/system` —— 装了什么一目了然,卸载即净。安装位置可用 `install --dir` 或环境变量 `LIGHTPN_DIR` 覆盖:
+[deploy/lightpn-hub.sh](deploy/lightpn-hub.sh) 与 [deploy/lightpn-agent.sh](deploy/lightpn-agent.sh) 是**交互式菜单脚本**,内嵌了 systemd 单元,把「二进制 + 同名脚本」两个文件传到服务器即可:
 
 ```sh
 # 本地
@@ -28,22 +28,14 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin
 scp bin/lightpn-hub   bin/lightpn-hub.sh   root@hub:/root/
 scp bin/lightpn-agent bin/lightpn-agent.sh root@edge:/root/
 
-# hub 机器:安装 + 写 public_addr + 设管理员密码 + 启动,一步完成
-sudo ./lightpn-hub.sh install --public-addr 203.0.113.10:7440
-
-# 边缘机器:安装 + 入网 + 启动(token 在面板生成;要参与出口加 --socks-port 1080)
-sudo ./lightpn-agent.sh install --hub 203.0.113.10:7440 --token lp_xxxxxxxx
-
-# 日常运维
-sudo ./lightpn-hub.sh   status|logs -f|restart|password
-sudo ./lightpn-agent.sh status|logs -f|restart
-
-# 完全卸载(hub 端删除数据会销毁 CA,需输入 yes 确认;--keep-data 保留数据)
-sudo ./lightpn-agent.sh uninstall
-sudo ./lightpn-hub.sh   uninstall
+# 服务器上直接运行进入菜单,输入编号选择功能
+sudo ./lightpn-hub.sh     # hub 机器
+sudo ./lightpn-agent.sh   # 边缘机器
 ```
 
-`install` 可重复执行:升级二进制、修改 `--public-addr` / `--socks-port` 时重跑即可。以下 runbook 为传统系统路径(`/usr/local/bin` + `/var/lib/lightpn`)的手工流程,与脚本安装的目录布局不同,二者不要混用。
+菜单涵盖:安装/升级、入网(agent)、启动/停止/重启、状态、日志(含实时跟踪)、重设管理员密码(hub)、完全卸载。所需参数(公网地址、入网 token、SOCKS 端口、安装目录等)在进入对应功能后按提示输入,菜单顶部实时显示安装/运行/入网状态。
+
+所有文件(二进制/配置/数据)集中安装在**运行 sudo 的用户主目录**下的 `~/lightpn`(hub 数据在 `~/lightpn/hub-data`,agent 身份在 `~/lightpn/identity`),只有 systemd 单元放在 `/etc/systemd/system` —— 装了什么一目了然,卸载即净。「安装/升级」可重复执行:升级二进制、修改公网地址 / SOCKS 端口时重跑即可。以下 runbook 为传统系统路径(`/usr/local/bin` + `/var/lib/lightpn`)的手工流程,与脚本安装的目录布局不同,二者不要混用。
 
 ## 从零到三节点(runbook)
 

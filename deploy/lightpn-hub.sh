@@ -1,24 +1,28 @@
 #!/usr/bin/env bash
-# LightPN hub 服务器端管理脚本(systemd Linux)。
-# 与 lightpn-hub 二进制放在同一目录,以 root 运行:
+# LightPN hub 交互式管理脚本(systemd Linux)。
+# 与 lightpn-hub 二进制放在同一目录,以 root 运行后按菜单编号操作:
 #
-#   sudo ./lightpn-hub.sh install --public-addr 203.0.113.10:7440
-#   sudo ./lightpn-hub.sh status
-#   sudo ./lightpn-hub.sh uninstall
+#   sudo ./lightpn-hub.sh
 #
 # 所有文件(二进制/配置/数据)集中安装在用户主目录下的 ~/lightpn,
 # 只有 systemd 单元放在 /etc/systemd/system。系统里装了什么一目了然,
 # 卸载时删掉单元 + 整个目录即净。
 # systemd 单元内嵌在本脚本里,服务器上只需要「二进制 + 本脚本」两个文件。
-set -euo pipefail
+set -uo pipefail
+
+red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'; blue='\033[0;34m'; plain='\033[0m'
+err()  { echo -e "${red}$*${plain}"; }
+ok()   { echo -e "${green}$*${plain}"; }
+warn() { echo -e "${yellow}$*${plain}"; }
 
 SERVICE=lightpn-hub
 UNIT=/etc/systemd/system/lightpn-hub.service
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 安装目录默认 <运行 sudo 的用户主目录>/lightpn;可用 LIGHTPN_DIR 环境变量
-# 或 install --dir 覆盖。已安装过时,一律以 unit 里记录的实际路径为准,
-# 避免换个用户执行脚本时算出不同目录。
+[ "$(id -u)" = 0 ] || { err "需要 root 权限,请用 sudo 运行"; exit 1; }
+
+# 安装目录默认 <运行 sudo 的用户主目录>/lightpn。已安装过时,一律以 unit
+# 里记录的实际路径为准,避免换个用户执行脚本时算出不同目录。
 default_app_dir() {
   local home="$HOME"
   if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
@@ -32,9 +36,8 @@ detect_app_dir() {
     exec_bin="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$UNIT")"
     if [ -n "$exec_bin" ]; then dirname "$exec_bin"; return; fi
   fi
-  echo "${LIGHTPN_DIR:-$(default_app_dir)}"
+  default_app_dir
 }
-
 set_paths() {
   APP_DIR="$1"
   BIN_DST="$APP_DIR/lightpn-hub"
@@ -43,28 +46,7 @@ set_paths() {
 }
 set_paths "$(detect_app_dir)"
 
-usage() {
-  cat <<EOF
-用法: lightpn-hub.sh <命令> [选项]
-
-  install [--public-addr <ip:port>] [--dir <安装目录>] [--bin <路径>]
-                安装到 $APP_DIR(二进制/配置/数据都在里面),写 systemd
-                单元,首次安装引导设置管理员密码,然后启动并设为开机自启。
-                可重复执行(升级二进制/改公网地址时重跑即可)。
-  password      重设管理员密码
-  start / stop / restart / status
-  logs [-f]     查看日志(-f 持续跟踪)
-  uninstall [--keep-data] [--yes]
-                停止并移除服务与整个 $APP_DIR。数据(SQLite + CA)一并删除
-                意味着销毁 CA、所有 agent 证书作废,不可逆,需输入 yes 确认;
-                --keep-data 只删二进制与单元,保留数据目录。
-
-提示: hub 下线不影响已建立的隧道;备份只需 $DATA_DIR。
-EOF
-}
-
-die() { echo "lightpn-hub.sh: $*" >&2; exit 1; }
-need_root() { [ "$(id -u)" = 0 ] || die "需要 root 权限,请用 sudo 运行"; }
+installed() { [ -f "$UNIT" ] && [ -f "$BIN_DST" ]; }
 
 write_unit() {
   cat >"$UNIT" <<EOF
@@ -92,34 +74,44 @@ WantedBy=multi-user.target
 EOF
 }
 
-cmd_install() {
-  need_root
-  local bin_src="$SCRIPT_DIR/lightpn-hub" public_addr=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --public-addr) public_addr="${2:?--public-addr 需要参数}"; shift 2 ;;
-      --dir)         set_paths "${2:?--dir 需要参数}"; shift 2 ;;
-      --bin)         bin_src="${2:?--bin 需要参数}"; shift 2 ;;
-      *) die "未知选项: $1" ;;
-    esac
-  done
-  [ -f "$bin_src" ] || die "找不到二进制 $bin_src(把 lightpn-hub 与本脚本放同一目录,或用 --bin 指定)"
+do_install() {
+  # 安装目录:首次安装可自定义,已安装则沿用 unit 中的目录做升级
+  if installed; then
+    ok "检测到已安装于 $APP_DIR,本次执行升级/更新配置。"
+  else
+    local d
+    read -rp "安装目录 (回车使用默认 $APP_DIR): " d
+    [ -n "$d" ] && set_paths "$d"
+  fi
 
-  echo "==> 安装到 $APP_DIR"
+  # 二进制:默认取脚本同目录下的 lightpn-hub
+  local bin_src="$SCRIPT_DIR/lightpn-hub"
+  if [ ! -f "$bin_src" ]; then
+    warn "脚本目录下没有 lightpn-hub 二进制。"
+    read -rp "请输入二进制路径: " bin_src
+    [ -f "$bin_src" ] || { err "找不到 $bin_src,安装中止。"; return 1; }
+  fi
+
+  echo -e "==> 安装到 ${blue}$APP_DIR${plain}"
   mkdir -p "$APP_DIR"
   # 先停服务再覆盖,避免 "text file busy";源与目标是同一文件则跳过
   systemctl stop "$SERVICE" 2>/dev/null || true
   if ! [ "$bin_src" -ef "$BIN_DST" ]; then
-    install -m 755 "$bin_src" "$BIN_DST"
+    install -m 755 "$bin_src" "$BIN_DST" || { err "复制二进制失败。"; return 1; }
   fi
 
-  if [ -z "$public_addr" ] && [ ! -f "$CONF" ]; then
-    echo "public_addr 是 agent 入网后回连 hub 的地址,强烈建议显式配置。"
-    read -rp "hub 公网地址 (ip:port,如 203.0.113.10:7440,回车跳过): " public_addr
+  # public_addr:agent 入网后回连 hub 的地址,强烈建议显式配置
+  local addr
+  if [ -f "$CONF" ]; then
+    echo -e "当前配置 $CONF: ${yellow}$(cat "$CONF")${plain}"
+    read -rp "hub 公网地址 (ip:port,回车保持现状): " addr
+  else
+    warn "public_addr 是 agent 入网后回连 hub 的地址,强烈建议显式配置。"
+    read -rp "hub 公网地址 (ip:port,如 203.0.113.10:7440,回车跳过): " addr
   fi
-  if [ -n "$public_addr" ]; then
-    printf '{ "public_addr": "%s" }\n' "$public_addr" >"$CONF"
-    echo "==> 已写入 $CONF"
+  if [ -n "$addr" ]; then
+    printf '{ "public_addr": "%s" }\n' "$addr" >"$CONF"
+    ok "已写入 $CONF"
   fi
 
   echo "==> 安装 systemd 单元 $UNIT"
@@ -128,64 +120,95 @@ cmd_install() {
 
   if [ ! -f "$DATA_DIR/hub.db" ]; then
     echo "==> 首次安装,设置管理员密码(至少 8 位)"
-    "$BIN_DST" admin set-password --data-dir "$DATA_DIR"
+    "$BIN_DST" admin set-password --data-dir "$DATA_DIR" || { err "设置密码失败。"; return 1; }
   fi
 
   echo "==> 启动服务"
-  systemctl enable --now "$SERVICE"
+  systemctl enable --now "$SERVICE" || { err "启动失败,可用菜单「查看日志」排查。"; return 1; }
   systemctl --no-pager --lines 0 status "$SERVICE" || true
 
-  cat <<EOF
-
-安装完成。接下来:
-  1. 防火墙放行 7440/tcp(控制通道);不要放行 7441(面板只绑 127.0.0.1)。
-  2. 面板经隧道/反代访问 http://127.0.0.1:7441(推荐 Cloudflare Tunnel + Access)。
-  3. 在面板生成一次性 token,到边缘机器上执行:
-       sudo ./lightpn-agent.sh install --hub <本机公网IP>:7440 --token lp_xxxx
-EOF
+  echo
+  ok "安装完成。接下来:"
+  echo "  1. 防火墙放行 7440/tcp(控制通道);不要放行 7441(面板只绑 127.0.0.1)。"
+  echo "  2. 面板经隧道/反代访问 http://127.0.0.1:7441(推荐 Cloudflare Tunnel + Access)。"
+  echo "  3. 在面板生成一次性 token,到边缘机器上运行 sudo ./lightpn-agent.sh 选择「安装」。"
 }
 
-cmd_uninstall() {
-  need_root
-  local keep_data=0 yes=0
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --keep-data) keep_data=1; shift ;;
-      --yes)       yes=1; shift ;;
-      *) die "未知选项: $1" ;;
-    esac
-  done
+do_password() {
+  installed || { err "尚未安装,请先执行「安装」。"; return 1; }
+  "$BIN_DST" admin set-password --data-dir "$DATA_DIR"
+}
 
+do_uninstall() {
+  installed || warn "未检测到完整安装,仍将尽量清理残留。"
   echo "==> 停止并移除服务"
   systemctl disable --now "$SERVICE" 2>/dev/null || true
   rm -f "$UNIT"
   systemctl daemon-reload
 
-  if [ "$keep_data" = 1 ]; then
-    rm -f "$BIN_DST"
-    echo "已保留数据 $DATA_DIR 与配置 $CONF(重装后可继续使用)。"
-  else
-    echo "即将删除整个 $APP_DIR(含 SQLite + CA 密钥)。"
-    echo "CA 销毁后所有 agent 证书作废、无法再撮合,此操作不可逆!"
-    if [ "$yes" != 1 ]; then
-      read -rp "确认删除请输入 yes: " ans
-      [ "$ans" = yes ] || { echo "已跳过数据删除(服务与单元已移除)。"; exit 0; }
-    fi
+  echo
+  warn "数据目录 $DATA_DIR 内有 SQLite 和 CA 密钥。"
+  warn "CA 销毁后所有 agent 证书作废、无法再撮合,删除不可逆!"
+  local ans
+  read -rp "连同数据一起删除整个 $APP_DIR ? (输入 yes 删除,回车只删程序保留数据): " ans
+  if [ "$ans" = yes ]; then
     rm -rf "$APP_DIR"
-    echo "已删除 $APP_DIR。"
+    ok "已删除 $APP_DIR。"
+  else
+    rm -f "$BIN_DST"
+    ok "已保留数据 $DATA_DIR 与配置 $CONF(重装后可继续使用)。"
   fi
-  echo "卸载完成。别忘了逐台清理边缘节点: sudo ./lightpn-agent.sh uninstall"
+  echo "卸载完成。别忘了逐台清理边缘节点(sudo ./lightpn-agent.sh 选「完全卸载」)。"
 }
 
-case "${1:-}" in
-  install)   shift; cmd_install "$@" ;;
-  uninstall) shift; cmd_uninstall "$@" ;;
-  password)  need_root; "$BIN_DST" admin set-password --data-dir "$DATA_DIR" ;;
-  start)     need_root; systemctl start "$SERVICE"; echo "已启动" ;;
-  stop)      need_root; systemctl stop "$SERVICE"; echo "已停止" ;;
-  restart)   need_root; systemctl restart "$SERVICE"; echo "已重启" ;;
-  status)    systemctl --no-pager status "$SERVICE" || true ;;
-  logs)      shift; journalctl -u "$SERVICE" -n 100 "$@" ;;
-  -h|--help|help|"") usage ;;
-  *) usage; die "未知命令: $1" ;;
-esac
+status_line() {
+  if installed; then
+    local st
+    st="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+    if [ "$st" = active ]; then
+      echo -e "状态: ${green}已安装,运行中${plain}"
+    else
+      echo -e "状态: ${yellow}已安装,未运行($st)${plain}"
+    fi
+  else
+    echo -e "状态: ${red}未安装${plain}"
+  fi
+  echo -e "目录: ${blue}$APP_DIR${plain}"
+}
+
+pause() { echo; read -rp "按回车返回菜单 ..." _; }
+
+while true; do
+  echo
+  echo -e "${green}========================================${plain}"
+  echo -e "${green}         LightPN hub 管理脚本${plain}"
+  echo -e "${green}========================================${plain}"
+  status_line
+  echo "----------------------------------------"
+  echo -e "  ${blue}1.${plain} 安装 / 升级(可修改公网地址)"
+  echo -e "  ${blue}2.${plain} 重设管理员密码"
+  echo -e "  ${blue}3.${plain} 启动"
+  echo -e "  ${blue}4.${plain} 停止"
+  echo -e "  ${blue}5.${plain} 重启"
+  echo -e "  ${blue}6.${plain} 查看运行状态"
+  echo -e "  ${blue}7.${plain} 查看最近日志"
+  echo -e "  ${blue}8.${plain} 实时跟踪日志(Ctrl+C 返回菜单)"
+  echo -e "  ${blue}9.${plain} 完全卸载"
+  echo -e "  ${blue}0.${plain} 退出"
+  echo "----------------------------------------"
+  read -rp "请输入编号: " choice
+  echo
+  case "$choice" in
+    1) do_install; pause ;;
+    2) do_password; pause ;;
+    3) systemctl start "$SERVICE" && ok "已启动" || err "启动失败"; pause ;;
+    4) systemctl stop "$SERVICE" && ok "已停止" || err "停止失败"; pause ;;
+    5) systemctl restart "$SERVICE" && ok "已重启" || err "重启失败"; pause ;;
+    6) systemctl --no-pager status "$SERVICE" || true; pause ;;
+    7) journalctl -u "$SERVICE" -n 100 --no-pager || true; pause ;;
+    8) trap : INT; journalctl -u "$SERVICE" -n 20 -f || true; trap - INT ;;
+    9) do_uninstall; pause ;;
+    0) exit 0 ;;
+    *) err "无效编号: $choice" ;;
+  esac
+done
