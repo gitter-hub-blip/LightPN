@@ -16,6 +16,9 @@ warn() { echo -e "${yellow}$*${plain}"; }
 
 SERVICE=lightpn-agent
 UNIT=/etc/systemd/system/lightpn-agent.service
+# /usr/local/bin 同时在普通 PATH 和 sudo 的 secure_path 上,把裸命令
+# lightpn-agent 放这里,hub 面板给的一步到位命令加不加 sudo 都能找到。
+LAUNCHER=/usr/local/bin/lightpn-agent
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 [ "$(id -u)" = 0 ] || { err "需要 root 权限,请用 sudo 运行"; exit 1; }
@@ -46,6 +49,26 @@ set_paths "$(detect_app_dir)"
 
 installed() { [ -f "$UNIT" ] && [ -f "$BIN_DST" ]; }
 enrolled()  { [ -d "$DATA_DIR" ] && [ -n "$(ls -A "$DATA_DIR" 2>/dev/null)" ]; }
+
+# 在 /usr/local/bin 放一个薄封装:解决两件事——
+#   1. sudo 的 secure_path 覆盖了 /usr/local/bin,裸命令 lightpn-agent
+#      加不加 sudo 都能找到(二进制本体仍在 ~/lightpn,不污染系统路径);
+#   2. hub 面板给的一步到位命令不带 --data-dir,这里自动补上与 service
+#      一致的目录,避免身份写到默认 /var/lib 而 service 读不到。
+# 用户若显式传了 --data-dir,则原样透传不覆盖。
+write_launcher() {
+  cat >"$LAUNCHER" <<EOF
+#!/usr/bin/env bash
+# 由 lightpn-agent.sh 自动生成,请勿手改。指向 $BIN_DST。
+bin="$BIN_DST"
+data_dir="$DATA_DIR"
+for a in "\$@"; do
+  case "\$a" in --data-dir|--data-dir=*) exec "\$bin" "\$@" ;; esac
+done
+exec "\$bin" "\$@" --data-dir "\$data_dir"
+EOF
+  chmod 755 "$LAUNCHER"
+}
 
 write_unit() {
   local socks_args="$1"
@@ -118,6 +141,11 @@ do_install() {
     install -m 755 "$bin_src" "$BIN_DST" || { err "复制二进制失败。"; return 1; }
   fi
 
+  # 放置 /usr/local/bin/lightpn-agent 封装,让 hub 面板的一步到位入网
+  # 命令(裸 lightpn-agent、无 --data-dir)在 sudo 下也能直接跑。
+  echo "==> 安装启动器 $LAUNCHER"
+  write_launcher || warn "写入 $LAUNCHER 失败(不影响 service,但裸命令入网可能 not found)。"
+
   # SOCKS 端口:参与出口功能(作为出口,或把本机翻墙出站接进隧道)时必需
   local socks_port socks_args=""
   echo "SOCKS 端口用于出口功能:开启后本节点在 overlay IP 上监听 SOCKS5,"
@@ -165,6 +193,10 @@ do_uninstall() {
   systemctl disable --now "$SERVICE" 2>/dev/null || true
   rm -f "$UNIT"
   systemctl daemon-reload
+  # 仅当封装确实指向本安装目录的二进制时才移除,避免误删他处安装的启动器。
+  if [ -f "$LAUNCHER" ] && grep -q "bin=\"$BIN_DST\"" "$LAUNCHER" 2>/dev/null; then
+    rm -f "$LAUNCHER"
+  fi
   # 移除内核 WG 设备(若还在)
   ip link del lightpn0 2>/dev/null || true
 
