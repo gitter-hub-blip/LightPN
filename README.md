@@ -16,6 +16,35 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/lightpn-agent ./cmd/lightpn-agent
 ```
 
+或直接 `./deploy/build.sh`(`GOARCH=arm64` 可切架构),它会把两个二进制和对应的服务器管理脚本一起放进 `bin/`。
+
+## 脚本化安装(推荐)
+
+[deploy/lightpn-hub.sh](deploy/lightpn-hub.sh) 与 [deploy/lightpn-agent.sh](deploy/lightpn-agent.sh) 内嵌了 systemd 单元,把「二进制 + 同名脚本」两个文件传到服务器即可完成安装/启动/卸载。所有文件(二进制/配置/数据)集中安装在**运行 sudo 的用户主目录**下的 `~/lightpn`(hub 数据在 `~/lightpn/hub-data`,agent 身份在 `~/lightpn/identity`),只有 systemd 单元放在 `/etc/systemd/system` —— 装了什么一目了然,卸载即净。安装位置可用 `install --dir` 或环境变量 `LIGHTPN_DIR` 覆盖:
+
+```sh
+# 本地
+./deploy/build.sh
+scp bin/lightpn-hub   bin/lightpn-hub.sh   root@hub:/root/
+scp bin/lightpn-agent bin/lightpn-agent.sh root@edge:/root/
+
+# hub 机器:安装 + 写 public_addr + 设管理员密码 + 启动,一步完成
+sudo ./lightpn-hub.sh install --public-addr 203.0.113.10:7440
+
+# 边缘机器:安装 + 入网 + 启动(token 在面板生成;要参与出口加 --socks-port 1080)
+sudo ./lightpn-agent.sh install --hub 203.0.113.10:7440 --token lp_xxxxxxxx
+
+# 日常运维
+sudo ./lightpn-hub.sh   status|logs -f|restart|password
+sudo ./lightpn-agent.sh status|logs -f|restart
+
+# 完全卸载(hub 端删除数据会销毁 CA,需输入 yes 确认;--keep-data 保留数据)
+sudo ./lightpn-agent.sh uninstall
+sudo ./lightpn-hub.sh   uninstall
+```
+
+`install` 可重复执行:升级二进制、修改 `--public-addr` / `--socks-port` 时重跑即可。以下 runbook 为传统系统路径(`/usr/local/bin` + `/var/lib/lightpn`)的手工流程,与脚本安装的目录布局不同,二者不要混用。
+
 ## 从零到三节点(runbook)
 
 ### 1. hub(1C1G VPS 即可)
