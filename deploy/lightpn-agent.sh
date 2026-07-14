@@ -88,12 +88,15 @@ RestartSec=3
 # The agent needs CAP_NET_ADMIN to manage the WireGuard device.
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
-# Hardening. ProtectSystem=strict keeps the filesystem read-only except
-# the app dir under the user's home (hence no ProtectHome, which would
-# mask /home and /root entirely).
+# Hardening. ProtectSystem=full locks /usr, /boot and /etc read-only but
+# leaves /home alone, so the agent reads/writes its identity under the app
+# dir directly. Do NOT use strict + ReadWritePaths=$APP_DIR here: bind-
+# mounting a /home subdir into the read-only namespace made the identity
+# unreadable inside the service on some hosts (identity present on disk,
+# service still failed with "no identity"). No ProtectHome either, which
+# would mask /home entirely.
 NoNewPrivileges=yes
-ProtectSystem=strict
-ReadWritePaths=$APP_DIR
+ProtectSystem=full
 PrivateTmp=yes
 
 # Exit code 0 after a hub-side kick means "do not restart".
