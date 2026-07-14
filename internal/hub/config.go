@@ -16,6 +16,11 @@ type Config struct {
 	// PublicAddr is the address agents are told to reconnect to
 	// (host:port). Defaults to the enrollment connection's local address.
 	PublicAddr string `json:"public_addr"`
+	// SecureCookie marks the panel session cookie Secure. The default (true)
+	// works both behind the Cloudflare HTTPS edge and for plain-HTTP loopback
+	// debugging (browsers treat localhost as a secure context); disable only
+	// if a non-localhost plain-HTTP origin must reach the panel directly.
+	SecureCookie bool `json:"secure_cookie"`
 
 	HeartbeatS  int `json:"heartbeat_s"`   // agent heartbeat period
 	DeadAfterS  int `json:"dead_after_s"`  // mark offline after this silence
@@ -32,6 +37,7 @@ func Defaults() Config {
 		DataDir:      "/var/lib/lightpn/hub",
 		ControlAddr:  "0.0.0.0:7440",
 		APIAddr:      "127.0.0.1:7441",
+		SecureCookie: true,
 		OverlayCIDR:  "100.100.0.0/24",
 		HeartbeatS:   15,
 		DeadAfterS:   45,

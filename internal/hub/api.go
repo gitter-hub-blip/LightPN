@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,12 +212,19 @@ func (a *apiServer) login(w http.ResponseWriter, r *http.Request) {
 	a.sessMu.Lock()
 	a.sessions[tok] = time.Now().Add(sessionTTL)
 	a.sessMu.Unlock()
-	http.SetCookie(w, &http.Cookie{
-		Name: "lp_session", Value: tok, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteStrictMode,
-		MaxAge: int(sessionTTL.Seconds()),
-	})
+	http.SetCookie(w, a.sessionCookie(tok, int(sessionTTL.Seconds())))
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// sessionCookie builds the lp_session cookie; login and logout must use
+// identical attributes or the clear won't match.
+func (a *apiServer) sessionCookie(value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name: "lp_session", Value: value, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		Secure: a.hub.Cfg.SecureCookie,
+		MaxAge: maxAge,
+	}
 }
 
 func (a *apiServer) logout(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +233,7 @@ func (a *apiServer) logout(w http.ResponseWriter, r *http.Request) {
 		delete(a.sessions, c.Value)
 		a.sessMu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: "lp_session", Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, a.sessionCookie("", -1))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -483,9 +491,21 @@ func (a *apiServer) deleteLink(w http.ResponseWriter, r *http.Request) {
 // ---- websocket fanout ----
 
 var upgrader = websocket.Upgrader{
-	// API is loopback-only behind Cloudflare Access; the session cookie
-	// already gates this endpoint.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	// The panel is same-origin. Only browsers send Origin, so an absent
+	// header (CLI clients) passes; a browser Origin must match the Host it
+	// dialed — defense in depth on top of the session cookie and the
+	// loopback-only listen address.
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return strings.EqualFold(u.Host, r.Host)
+	},
 }
 
 func (a *apiServer) ws(w http.ResponseWriter, r *http.Request) {

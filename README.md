@@ -9,7 +9,7 @@
 
 ## 构建
 
-需要 Go ≥ 1.22(仓库用 1.26 开发)。纯 Go、免 CGO,可任意交叉编译:
+需要 Go ≥ 1.26(以 `go.mod` 声明为准)。纯 Go、免 CGO,可任意交叉编译:
 
 ```sh
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/lightpn-hub   ./cmd/lightpn-hub

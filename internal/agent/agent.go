@@ -43,25 +43,58 @@ type Agent struct {
 	SocksListen string
 	SocksPort   int
 
-	socksOnce sync.Once
-
 	connMu sync.Mutex
 	conn   net.Conn
+
+	// Current WG identity: set once by Run, replaced only by an explicit
+	// rotate_wg. Read/written only on the Run→session goroutine.
+	wgPub        string
+	wgListenPort int
 }
+
+// stableSession is how long a session must survive before the reconnect
+// backoff resets: failures days apart shouldn't inherit an old penalty.
+const stableSession = time.Minute
 
 // Run connects (with exponential backoff) and serves sessions forever,
 // until kicked. Every reconnect goes through the §5.3 register/reconcile
 // convergence path.
 func (a *Agent) Run() error {
 	warmupCPU()
+
+	// The WG device lives for the whole process: control-channel loss must
+	// not disturb an established data plane (§4 invariant 1). The key pair
+	// is still ephemeral — generated here, never persisted (invariant 2).
+	// Only rotate_wg, kick, or a process restart change it.
+	pubkey, port, err := a.WG.Init(a.ID.OverlayIP, a.ID.OverlayCIDR, a.WGPort)
+	if err != nil {
+		return fmt.Errorf("wireguard init: %w", err)
+	}
+	a.wgPub, a.wgListenPort = pubkey, port
+
+	// Start the exit SOCKS listener once the overlay device exists, so a
+	// bind to the overlay IP succeeds. It lives for the whole process;
+	// upstream switching (not re-binding) handles subsequent peer events.
+	if a.Exit != nil && a.SocksListen != "" {
+		go func() {
+			if err := a.Exit.Serve(context.Background(), a.SocksListen); err != nil {
+				a.Log.Error("exit SOCKS server stopped", "err", err)
+			}
+		}()
+	}
+
 	backoff := time.Second
 	for {
+		started := time.Now()
 		err := a.session()
 		if errors.Is(err, ErrKicked) {
 			return err
 		}
 		if err != nil {
 			a.Log.Warn("session ended", "err", err)
+		}
+		if time.Since(started) >= stableSession {
+			backoff = time.Second
 		}
 		// Exponential backoff: 1s → 60s, ±20% jitter.
 		jitter := 0.8 + 0.4*rand.Float64()
@@ -92,31 +125,12 @@ func (a *Agent) session() error {
 	a.conn = conn
 	a.connMu.Unlock()
 
-	// Fresh ephemeral WG material for this session (invariant 2). The
-	// device is rebuilt so no peer from a previous run survives.
-	pubkey, port, err := a.WG.Init(a.ID.OverlayIP, a.ID.OverlayCIDR, a.WGPort)
-	if err != nil {
-		return fmt.Errorf("wireguard init: %w", err)
-	}
-
-	// Start the exit SOCKS listener only after the overlay device exists,
-	// so a bind to the overlay IP succeeds. It lives for the whole process
-	// lifetime; the overlay IP is stable across reconnects, so upstream
-	// switching (not re-binding) handles subsequent peer events.
-	if a.Exit != nil && a.SocksListen != "" {
-		a.socksOnce.Do(func() {
-			go func() {
-				if err := a.Exit.Serve(context.Background(), a.SocksListen); err != nil {
-					a.Log.Error("exit SOCKS server stopped", "err", err)
-				}
-			}()
-		})
-	}
-
-	if err := a.register(conn, pubkey, port); err != nil {
+	// Re-register with the existing WG identity: a control reconnect only
+	// converges peer state (register + reconcile), never the data plane.
+	if err := a.register(conn, a.wgPub, a.wgListenPort); err != nil {
 		return err
 	}
-	a.Log.Info("registered with hub", "control", a.ID.ControlAddr, "wg_port", port)
+	a.Log.Info("registered with hub", "control", a.ID.ControlAddr, "wg_port", a.wgListenPort)
 
 	// Heartbeat loop.
 	stop := make(chan struct{})
@@ -271,10 +285,15 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 
 	case proto.TypeRotateWG:
 		a.ack(conn, env.ID, nil)
-		a.Log.Info("rotating WG key on hub request")
-		// Reuse the full convergence path: drop the session; reconnect
-		// regenerates the key and re-registers (§5.7).
-		return errors.New("rotate_wg: reconnecting with fresh key")
+		pub, err := a.WG.Rotate()
+		if err != nil {
+			return fmt.Errorf("rotate_wg: %w", err)
+		}
+		a.wgPub = pub
+		a.Log.Info("rotated WG key on hub request")
+		// Drop the session: reconnecting re-registers the new pubkey and
+		// reconciles peers (§5.7); the hub pushes peer_update to the others.
+		return errors.New("rotate_wg: re-registering with fresh key")
 
 	case proto.TypeRotateCert:
 		var d proto.RotateCertData
