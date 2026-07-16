@@ -85,9 +85,16 @@ Type=simple
 ExecStart=$BIN_DST --data-dir $DATA_DIR$socks_args
 Restart=always
 RestartSec=3
-# The agent needs CAP_NET_ADMIN to manage the WireGuard device.
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+# CAP_NET_ADMIN drives the WireGuard device. CAP_DAC_READ_SEARCH lets the
+# root service traverse the 0750 /home/<user> dir to reach its identity
+# under the app dir: capping the bounding set at CAP_NET_ADMIN alone strips
+# root of DAC-override, so it can't enter /home/<user> and fails with
+# "no identity" even though it runs as root and the files are present
+# (a foreground root keeps full caps, which is why it worked there).
+# DAC_READ_SEARCH only bypasses read/traverse checks, not write, so the
+# hardening loss is minimal.
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
 # Hardening. ProtectSystem=full locks /usr, /boot and /etc read-only but
 # leaves /home alone, so the agent reads/writes its identity under the app
 # dir directly. Do NOT use strict + ReadWritePaths=$APP_DIR here: bind-
