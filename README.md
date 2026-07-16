@@ -33,7 +33,7 @@ sudo ./lightpn-hub.sh     # hub 机器
 sudo ./lightpn-agent.sh   # 边缘机器
 ```
 
-菜单涵盖:安装/升级、入网(agent)、启动/停止/重启、状态、日志(含实时跟踪)、重设管理员密码(hub)、完全卸载。所需参数(公网地址、入网 token、SOCKS 端口、安装目录等)在进入对应功能后按提示输入,菜单顶部实时显示安装/运行/入网状态。
+菜单涵盖:安装/升级、入网(agent)、启动/停止/重启、状态、日志(含实时跟踪)、重设管理员密码(hub)、完全卸载。所需参数(公网地址、入网 token、SOCKS 端口、WG 端口、安装目录等)在进入对应功能后按提示输入,菜单顶部实时显示安装/运行/入网状态。
 
 所有文件(二进制/配置/数据)集中安装在**运行 sudo 的用户主目录**下的 `~/lightpn`(hub 数据在 `~/lightpn/hub-data`,agent 身份在 `~/lightpn/identity`),只有 systemd 单元放在 `/etc/systemd/system` —— 装了什么一目了然,卸载即净。「安装/升级」可重复执行:升级二进制、修改公网地址 / SOCKS 端口时重跑即可。以下 runbook 为传统系统路径(`/usr/local/bin` + `/var/lib/lightpn`)的手工流程,与脚本安装的目录布局不同,二者不要混用。
 
@@ -77,7 +77,7 @@ systemctl enable --now cloudflared
 
 ### 3. 边缘节点入网
 
-面板(或 API)生成一次性 token,然后在每台边缘机器上:
+面板生成 token 时会直接给出**完整的一步到位入网命令**:已含 `sudo`(secure_path 兼容),配了 `public_addr` 时自动填入真实 `ip:port`,末尾链上 `&& sudo systemctl enable --now lightpn-agent` 使节点入网后自动上线 —— 用脚本安装的 agent 复制粘贴即可。以下是等价的系统路径手工流程:
 
 ```sh
 sudo install -m 755 bin/lightpn-agent /usr/local/bin/
@@ -90,7 +90,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now lightpn-agent
 ```
 
-要求:Linux ≥ 5.6(内核内建 WireGuard)、iproute2、放行本机 WG UDP 端口(默认 51820)。
+要求:Linux ≥ 5.6(内核内建 WireGuard)、iproute2、放行本机 WG UDP 端口(默认 51820)。需自定义时用脚本安装的「WG 端口」选项或给 agent 加 `--wg-port <N>`,并放行对应的 `N/udp`;hub 会向对端通告 `<本机公网IP>:<N>`,故该端口须公网可达、且不要落在做端口转换的 NAT 后。
 
 ### 4. 建立连接
 

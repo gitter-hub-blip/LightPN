@@ -363,7 +363,7 @@ CREATE TABLE ip_cooldown (
 
 **hub 侧**(1C1G VPS):`lightpn-hub` + `cloudflared` 两个 systemd 服务。防火墙放行:7440/tcp(控制通道)、可选 51820/udp(若 hub 未来加入 overlay);7441 不放行。资源预算:hub 进程 30–50 MB,cloudflared 约 30 MB,SQLite 与 ring buffer 合计 < 50 MB,总占用不足 1 GB 的一半,余量充足。
 
-**agent 侧**:单 systemd 服务,`After=network-online.target`。依赖内核 WireGuard 模块(Linux ≥ 5.6 内置);防火墙放行本机 WG UDP 端口。agent 崩溃或重启的恢复完全走 §5.3 的 register 收敛路径,无需人工干预。
+**agent 侧**:单 systemd 服务,`After=network-online.target`。依赖内核 WireGuard 模块(Linux ≥ 5.6 内置);防火墙放行本机 WG UDP 端口(默认 51820,`--wg-port <N>` 可改)。因 endpoint 端口取自 agent 自报值(不变式 5,§4)、IP 取自控制连接源,自定义端口须保证 `<公网IP>:<N>` 公网可达且不落在做端口转换的 NAT 后(外部端口须等于自报端口),否则对端会打到错误 endpoint、link 停在 `degraded`。agent 崩溃或重启的恢复完全走 §5.3 的 register 收敛路径,无需人工干预。
 
 **升级策略**:协议信封的 `v` 字段 + register 中的 `agent_version` 支撑灰度:hub 兼容 N 与 N-1 两个协议版本,agent 逐台升级。hub 自身升级导致的控制通道中断不影响数据面(不变量 1),窗口期内仅撮合与监控不可用。
 
