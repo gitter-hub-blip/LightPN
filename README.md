@@ -37,6 +37,28 @@ sudo ./lightpn-agent.sh   # 边缘机器
 
 所有文件(二进制/配置/数据)集中安装在**运行 sudo 的用户主目录**下的 `~/lightpn`(hub 数据在 `~/lightpn/hub-data`,agent 身份在 `~/lightpn/identity`),只有 systemd 单元放在 `/etc/systemd/system` —— 装了什么一目了然,卸载即净。「安装/升级」可重复执行:升级二进制、修改公网地址 / SOCKS 端口时重跑即可。以下 runbook 为传统系统路径(`/usr/local/bin` + `/var/lib/lightpn`)的手工流程,与脚本安装的目录布局不同,二者不要混用。
 
+## 端口与防火墙
+
+### hub 机
+
+| 端口 | 协议 | 方向 | 用途 | 防火墙 |
+|---|---|---|---|---|
+| 7440 | TCP | 入站 | 控制通道(mTLS),所有 agent 回连注册/心跳 | **必须放行**,公网可达 |
+| 7441 | TCP | 仅本机 | Web 面板 + REST/WS,只绑 `127.0.0.1` | **不要放行**,经 Cloudflare Tunnel 暴露 |
+
+hub 不参与数据面,无需放行任何 UDP 端口。`cloudflared` 只向 Cloudflare 发起出站连接,同样不需要入站规则。
+
+### agent 机
+
+| 端口 | 协议 | 方向 | 用途 | 防火墙 |
+|---|---|---|---|---|
+| 51820(默认,可改) | UDP | 入站 | WireGuard 数据面,对端 agent 直连 | **必须放行**,公网可达且不经端口转换 NAT |
+| 1080(示例,`--socks-port`) | TCP | 仅 overlay | 出口 SOCKS5,只绑 overlay IP(如 `100.100.0.3`),流量本就在 WG 隧道内 | 无需放行 |
+
+WG 端口用脚本安装的「WG 端口」选项或 `--wg-port <N>` 自定义,放行对应的 `N/udp` 即可;hub 会向对端通告 `<本机公网IP>:<N>`,故该端口必须原样公网可达。link 状态 `degraded` 最常见的原因就是这里没放行。
+
+出站方向:agent 需能主动连到 hub 的 `7440/tcp` 以及对端 agent 的 WG UDP 端口;默认放行出站的防火墙无需额外配置。
+
 ## 从零到三节点(runbook)
 
 ### 1. hub(1C1G VPS 即可)
