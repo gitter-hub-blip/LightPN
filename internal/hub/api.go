@@ -385,6 +385,9 @@ func (a *apiServer) createToken(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"id": tok.ID, "token": plaintext, "expires_at": tok.ExpiresAt,
+		// The agents' reconnect address (public_addr) so the panel can emit a
+		// complete enroll command; empty when the hub isn't configured with one.
+		"control_addr": a.hub.Cfg.PublicAddr,
 	})
 }
 

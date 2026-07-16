@@ -358,11 +358,17 @@ async function addNodeModal() {
   let tok;
   try { tok = await api("POST", "/api/tokens", {}); }
   catch (e) { toast("生成 token 失败: " + e.message); return; }
-  const cmd = `lightpn-agent enroll --hub ${location.hostname === "localhost" || location.hostname === "127.0.0.1" ? "<hub公网IP>:7440" : "<hub公网IP>:7440"} --token ${tok.token}`;
+  const hubAddr = (tok.control_addr || "").trim() || "<hub公网IP>:7440";
+  const needsAddr = hubAddr.startsWith("<");
+  // Complete one-liner: real hub addr from the backend, sudo (needs root to
+  // write identity + manage the service), and it enables+starts the service
+  // so the node comes online without a separate step.
+  const cmd = `sudo lightpn-agent enroll --hub ${hubAddr} --token ${tok.token} && sudo systemctl enable --now lightpn-agent`;
   const mask = showModal(`
     <h2>添加节点</h2>
-    <p class="hint" style="margin-bottom:10px">在新的边缘机器上执行以下命令(token 15 分钟内有效,使用即焚):</p>
+    <p class="hint" style="margin-bottom:10px">在新的边缘机器上以 root 执行以下命令(保留开头的 sudo;入网成功后会自动启动服务;token 15 分钟内有效,使用即焚):</p>
     <div class="cmdbox" id="cmd">${esc(cmd)}</div>
+    ${needsAddr ? `<div class="hint" style="color:#c60">hub 未配置 public_addr,命令里的 &lt;hub公网IP&gt;:7440 需手动替换为本机公网地址;或在 hub.json 设 public_addr 并重启 hub 后即自动填入。</div>` : ``}
     <div class="hint">点击命令可复制。节点入网后会自动出现在列表中。</div>
     <div class="actions"><button class="primary" id="close">完成</button></div>
   `);
