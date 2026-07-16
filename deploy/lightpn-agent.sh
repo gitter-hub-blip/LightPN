@@ -71,7 +71,7 @@ EOF
 }
 
 write_unit() {
-  local socks_args="$1"
+  local socks_args="$1" wg_args="$2"
   cat >"$UNIT" <<EOF
 [Unit]
 Description=LightPN agent (edge node)
@@ -80,9 +80,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# To let this node act as (or use) an exit, append: --socks-port 1080
-# It binds the exit SOCKS5 on the overlay IP and advertises it to the hub.
-ExecStart=$BIN_DST --data-dir $DATA_DIR$socks_args
+# --socks-port 1080 makes this node an exit (binds SOCKS5 on the overlay IP,
+# advertised to the hub). --wg-port <N> overrides the WireGuard listen port
+# (default 51820); the hub advertises <observed-public-IP>:<N> to peers, so
+# open N/udp inbound and don't put it behind a port-translating NAT.
+ExecStart=$BIN_DST --data-dir $DATA_DIR$socks_args$wg_args
 Restart=always
 RestartSec=3
 # CAP_NET_ADMIN drives the WireGuard device. CAP_DAC_READ_SEARCH lets the
@@ -170,8 +172,25 @@ do_install() {
     err "端口须是 1-65535 的数字。"
   done
 
+  # WG 端口:其他节点入站连本机走这个 UDP 端口。默认 51820,仅当默认被占用、
+  # 或防火墙/端口映射只放行特定端口时才自定义。hub 会向对端通告
+  # <本机公网IP>:<此端口>,故须放行 <端口>/udp 且不要落在端口转换的 NAT 后。
+  local wg_port wg_args="" wg_effective=51820
+  echo "WireGuard 端口(其他节点入站连本机用):默认 51820,回车即用默认;"
+  echo "仅当默认端口被占用,或防火墙/端口映射只放行特定端口时才需自定义。"
+  while true; do
+    read -rp "WG 端口 (回车用默认 51820): " wg_port
+    [ -z "$wg_port" ] && break
+    if [[ "$wg_port" =~ ^[0-9]+$ ]] && [ "$wg_port" -ge 1 ] && [ "$wg_port" -le 65535 ]; then
+      wg_args=" --wg-port $wg_port"
+      wg_effective="$wg_port"
+      break
+    fi
+    err "端口须是 1-65535 的数字。"
+  done
+
   echo "==> 安装 systemd 单元 $UNIT"
-  write_unit "$socks_args"
+  write_unit "$socks_args" "$wg_args"
   systemctl daemon-reload
 
   if ! enrolled; then
@@ -187,7 +206,7 @@ do_install() {
   systemctl enable --now "$SERVICE" || { err "启动失败,可用菜单「查看日志」排查。"; return 1; }
   systemctl --no-pager --lines 0 status "$SERVICE" || true
   echo
-  ok "安装完成。记得放行本机 WG UDP 端口(默认 51820),否则 link 会是 degraded。"
+  ok "安装完成。记得放行本机 WG UDP 端口($wg_effective/udp,主机防火墙 + 云安全组),否则 link 会是 degraded。"
 }
 
 do_enroll() {
