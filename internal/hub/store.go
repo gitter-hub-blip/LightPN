@@ -58,23 +58,6 @@ CREATE TABLE IF NOT EXISTS ip_cooldown (
   overlay_ip  TEXT PRIMARY KEY,
   freed_at    INTEGER NOT NULL
 );
-CREATE TABLE IF NOT EXISTS exitwg (
-  node_id TEXT PRIMARY KEY REFERENCES nodes(id),
-  enabled INTEGER NOT NULL DEFAULT 0,
-  port    INTEGER NOT NULL,
-  cidr    TEXT NOT NULL,
-  pubkey  TEXT NOT NULL DEFAULT ''    -- agent's persistent server pubkey, from exitwg_status
-);
-CREATE TABLE IF NOT EXISTS exitwg_peers (
-  id         TEXT PRIMARY KEY,
-  node_id    TEXT NOT NULL REFERENCES nodes(id),
-  name       TEXT NOT NULL,
-  pubkey     TEXT NOT NULL,
-  ip         TEXT NOT NULL,           -- client /32 within the node's exitwg cidr
-  created_at INTEGER NOT NULL,
-  UNIQUE(node_id, pubkey),
-  UNIQUE(node_id, ip)
-);
 `
 
 // OpenStore opens (and migrates) the SQLite database at path.
@@ -216,12 +199,6 @@ func (s *Store) DeleteNode(id string, now int64) (*Node, []*Link, error) {
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(`DELETE FROM links WHERE a=? OR b=?`, id, id); err != nil {
-		return nil, nil, err
-	}
-	if _, err := tx.Exec(`DELETE FROM exitwg_peers WHERE node_id=?`, id); err != nil {
-		return nil, nil, err
-	}
-	if _, err := tx.Exec(`DELETE FROM exitwg WHERE node_id=?`, id); err != nil {
 		return nil, nil, err
 	}
 	// The revoked row is kept only for the cert revocation list; free its

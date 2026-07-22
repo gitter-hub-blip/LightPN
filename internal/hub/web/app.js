@@ -12,7 +12,6 @@ const state = {
   links: [],        // GET /api/links
   spark: {},        // nodeId -> [{cpu, rx_rate, tx_rate}] recent heartbeats
   toolconf: null,   // { id, data, loading, err } — survives heartbeat re-renders
-  exitwg: null,     // { id, data } cached direct-WG state for the open node
   confShown: new Set(), // indices of currently revealed masked values
   ws: null,
   wsUp: false,
@@ -179,9 +178,6 @@ function handleEvent(msg) {
     case "enrolled":
       refreshSnapshots().then(render);
       break;
-    case "exitwg_status":
-      if (state.route.startsWith("#/node/") && state.route.slice(7) === d.node_id) loadExitWG(d.node_id);
-      break;
     case "link_status": {
       const l = state.links.find(l => l.id === d.link_id);
       if (l && d.status !== "deleted") { l.status = d.status; render(); }
@@ -294,9 +290,6 @@ function nodeDetailView(id) {
     </div>
     <div class="section-title">当前 Peer</div>
     <div id="peer-table"><div class="empty">加载中…</div></div>
-    <div class="section-title">直连 WG(设备直连出口)</div>
-    <div class="hint" style="margin-bottom:8px">独立于组网的第二个 WireGuard 接口(lightpn1):你的手机/电脑直连该节点并以它为全隧道出口。默认关闭。</div>
-    <div id="exitwg-box"><div class="empty">加载中…</div></div>
     <div class="section-title">网络工具配置</div>
     <div class="hint" style="margin-bottom:8px">实时从节点读取翻墙软件配置与 WireGuard 运行时状态(不含私钥)。敏感字段默认打码,点击可显示。</div>
     <button id="btn-toolconf" ${n.status === "offline" ? "disabled" : ""}>拉取配置</button>
@@ -485,11 +478,6 @@ function bindNodeDetail(id) {
   $("#btn-toolconf").onclick = () => loadToolConf(id);
   renderToolConf();
 
-  // Direct-connect WG: cached in state like toolconf; re-fetched on actions
-  // and on exitwg_status WS events, not on every heartbeat re-render.
-  if (state.exitwg && state.exitwg.id !== id) state.exitwg = null;
-  if (state.exitwg) renderExitWG(); else loadExitWG(id);
-
   loadNodeDetail(id);
 }
 
@@ -524,165 +512,6 @@ async function loadNodeDetail(id) {
         <td class="mono">${esc(p.endpoint || "–")}</td>
       </tr>`).join("")}</table>` : `<div class="empty">该节点当前没有 peer。</div>`;
   } catch (e) { /* node offline / no data */ }
-}
-
-// ---- direct-connect WG (exitwg) ----
-
-// wgKeypair generates a WireGuard keypair in the browser via WebCrypto
-// X25519. Returns null when unsupported — the UI falls back to pasting a
-// pubkey generated on the device.
-async function wgKeypair() {
-  try {
-    const kp = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]);
-    const pub = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
-    const jwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
-    const b64u = jwk.d.replace(/-/g, "+").replace(/_/g, "/");
-    const priv = Uint8Array.from(atob(b64u + "=".repeat((4 - b64u.length % 4) % 4)), c => c.charCodeAt(0));
-    const b64 = bytes => btoa(String.fromCharCode(...bytes));
-    if (priv.length !== 32 || pub.length !== 32) return null;
-    return { priv: b64(priv), pub: b64(pub) };
-  } catch (e) { return null; }
-}
-
-async function loadExitWG(id) {
-  try {
-    const data = await api("GET", `/api/nodes/${id}/exitwg`);
-    state.exitwg = { id, data };
-  } catch (e) {
-    state.exitwg = { id, err: e.message };
-  }
-  renderExitWG();
-}
-
-function clientConf(ew, ip, privKey) {
-  const host = ew.endpoint_host || "<节点公网IP>";
-  return `[Interface]
-PrivateKey = ${privKey || "<你的设备私钥>"}
-Address = ${ip}
-DNS = 1.1.1.1
-
-[Peer]
-PublicKey = ${ew.pubkey || "<启用后由节点生成,见面板服务端公钥>"}
-Endpoint = ${host}:${ew.port}
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25`;
-}
-
-function renderExitWG() {
-  const box = $("#exitwg-box");
-  const ew = state.exitwg;
-  if (!box || !ew) return;
-  if (ew.err) { box.innerHTML = `<div class="empty">加载失败:${esc(ew.err)}</div>`; return; }
-  const d = ew.data;
-  const peers = d.peers || [];
-  const rows = peers.map(p => `
-    <tr>
-      <td>${esc(p.name)}</td>
-      <td class="mono">${esc(p.ip)}</td>
-      <td class="mono" title="${esc(p.pubkey)}">${esc(p.pubkey.slice(0, 12))}…</td>
-      <td style="display:flex;gap:6px">
-        <button data-ewconf="${esc(p.ip)}">配置</button>
-        <button class="danger" data-ewdel="${esc(p.id)}">移除</button>
-      </td>
-    </tr>`).join("");
-  box.innerHTML = `
-    <div class="card" style="margin-bottom:12px">
-      <div class="kv"><span class="k">状态</span><span class="v">
-        <span class="pill ${d.enabled ? "online" : "offline"}">${d.enabled ? "已启用" : "已停用"}</span></span></div>
-      <div class="kv"><span class="k">监听端口(UDP)</span><span class="v">${d.port}</span></div>
-      <div class="kv"><span class="k">网段</span><span class="v">${esc(d.cidr)}</span></div>
-      <div class="kv"><span class="k">服务端公钥</span><span class="v" title="${esc(d.pubkey)}">${d.pubkey ? esc(d.pubkey.slice(0, 16)) + "…" : "启用后生成"}</span></div>
-      ${d.enabled ? `<div class="hint">请在该节点防火墙放行 ${d.port}/udp。</div>` : ""}
-      <div style="margin-top:10px;display:flex;gap:8px">
-        <button class="${d.enabled ? "danger" : "primary"}" id="ew-toggle">${d.enabled ? "停用" : "启用"}</button>
-        <button id="ew-add" ${d.enabled ? "" : "disabled"}>＋ 添加设备</button>
-      </div>
-    </div>
-    ${peers.length ? `<table>
-      <tr><th>设备</th><th>隧道 IP</th><th>公钥</th><th></th></tr>${rows}</table>`
-      : `<div class="empty">还没有设备。${d.enabled ? "点击「添加设备」生成客户端配置。" : "先启用直连 WG。"}</div>`}
-  `;
-  const id = ew.id;
-  $("#ew-toggle", box).onclick = () => exitwgToggleModal(id, d);
-  $("#ew-add", box).onclick = () => exitwgAddDeviceModal(id, d);
-  box.querySelectorAll("[data-ewdel]").forEach(el => {
-    el.onclick = () => confirmModal("移除该设备?它将立即无法再连接此节点。", async () => {
-      try { await api("DELETE", `/api/nodes/${id}/exitwg/peers/${el.dataset.ewdel}`); toast("已移除"); loadExitWG(id); }
-      catch (e) { toast(e.message); }
-    });
-  });
-  box.querySelectorAll("[data-ewconf]").forEach(el => {
-    el.onclick = () => {
-      const conf = clientConf(d, el.dataset.ewconf, null);
-      const mask = showModal(`
-        <h2>客户端配置</h2>
-        <p class="hint" style="margin-bottom:8px">私钥只在添加设备时展示一次,这里以占位符代替 —— 其余字段与当时一致。</p>
-        <div class="cmdbox" id="ew-conf" style="white-space:pre">${esc(conf)}</div>
-        <div class="hint">点击可复制。</div>
-        <div class="actions"><button class="primary" id="close">关闭</button></div>`);
-      $("#ew-conf", mask).onclick = () => navigator.clipboard.writeText(conf).then(() => toast("已复制"));
-      $("#close", mask).onclick = () => mask.remove();
-    };
-  });
-}
-
-function exitwgToggleModal(id, d) {
-  if (d.enabled) {
-    confirmModal("停用直连 WG?接口将被移除,所有已配置设备立即断开(设备列表保留,重新启用即恢复)。", async () => {
-      try { await api("PUT", `/api/nodes/${id}/exitwg`, { enabled: false, port: d.port }); toast("已下发停用"); setTimeout(() => loadExitWG(id), 500); }
-      catch (e) { toast(e.message); }
-    });
-    return;
-  }
-  const mask = showModal(`
-    <h2>启用直连 WG</h2>
-    <div class="row"><label class="hint">监听端口(UDP,需在节点防火墙放行;勿与组网 WG 端口相同)</label>
-      <input id="ew-port" type="number" min="1" max="65535" value="${d.port}"></div>
-    <p class="hint">启用后 agent 将创建 lightpn1 接口,并自动配置 IP 转发与 NAT(卸载/停用时清理)。</p>
-    <div class="actions"><button id="cancel">取消</button><button class="primary" id="ok">启用</button></div>`);
-  $("#cancel", mask).onclick = () => mask.remove();
-  $("#ok", mask).onclick = async () => {
-    const port = parseInt($("#ew-port", mask).value, 10);
-    if (!port || port < 1 || port > 65535) { toast("端口无效"); return; }
-    try {
-      await api("PUT", `/api/nodes/${id}/exitwg`, { enabled: true, port });
-      mask.remove(); toast("已下发启用");
-      setTimeout(() => loadExitWG(id), 500); // give the agent a beat to report its pubkey
-    } catch (e) { toast(e.message); }
-  };
-}
-
-async function exitwgAddDeviceModal(id, d) {
-  const kp = await wgKeypair();
-  const mask = showModal(`
-    <h2>添加设备</h2>
-    <div class="row"><input id="ew-name" placeholder="设备名(如 iphone)"></div>
-    ${kp ? `<p class="hint">已在浏览器本地生成密钥对;私钥只出现在下面的配置里,面板不保存。</p>`
-         : `<div class="row"><input id="ew-pub" placeholder="设备公钥(在设备上 wg genkey | wg pubkey 生成)"></div>
-            <p class="hint">当前浏览器不支持本地生成 X25519 密钥,请粘贴设备公钥。</p>`}
-    <div class="actions"><button id="cancel">取消</button><button class="primary" id="ok">添加</button></div>`);
-  $("#cancel", mask).onclick = () => mask.remove();
-  $("#ok", mask).onclick = async () => {
-    const name = $("#ew-name", mask).value.trim();
-    if (!name) { toast("请填设备名"); return; }
-    const pubkey = kp ? kp.pub : ($("#ew-pub", mask) ? $("#ew-pub", mask).value.trim() : "");
-    if (!pubkey) { toast("请填设备公钥"); return; }
-    let p;
-    try { p = await api("POST", `/api/nodes/${id}/exitwg/peers`, { name, pubkey }); }
-    catch (e) { toast(e.message); return; }
-    mask.remove();
-    loadExitWG(id);
-    const conf = clientConf(d, p.ip, kp ? kp.priv : null);
-    const m2 = showModal(`
-      <h2>${esc(name)} 的客户端配置</h2>
-      <p class="hint" style="margin-bottom:8px">${kp ? "含私钥,仅此一次展示 —— 现在就导入设备(WireGuard 客户端「从文件/剪贴板导入」)。" : "把 <你的设备私钥> 换成设备上生成的私钥。"}
-      ${d.pubkey ? "" : "⚠ 服务端公钥尚未生成(节点还没应答),稍后在设备列表「配置」里查看完整版。"}</p>
-      <div class="cmdbox" id="ew-conf" style="white-space:pre">${esc(conf)}</div>
-      <div class="hint">点击可复制。</div>
-      <div class="actions"><button class="primary" id="close">完成</button></div>`);
-    $("#ew-conf", m2).onclick = () => navigator.clipboard.writeText(conf).then(() => toast("已复制"));
-    $("#close", m2).onclick = () => m2.remove();
-  };
 }
 
 // ---- tool config (conf_get) ----

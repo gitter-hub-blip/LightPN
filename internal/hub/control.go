@@ -294,8 +294,6 @@ func (h *Hub) runSession(conn *tls.Conn, node *Node) {
 			h.handleAck(s, env)
 		case proto.TypeConfResult:
 			h.handleConfResult(s, env)
-		case proto.TypeExitWGState:
-			h.handleExitWGState(s, env)
 		default:
 			h.sendError(conn, proto.ErrUnknownType, "unknown message type "+env.Type)
 		}
@@ -386,18 +384,10 @@ func (h *Hub) handleRegister(s *session, env *proto.Envelope) {
 	}
 	h.mu.Unlock()
 
-	// Direct-connect WG desired state rides along so changes made while the
-	// agent was offline (including disable) converge on register.
-	exitSpec, err := h.ExitWGSpec(s.node.ID)
-	if err != nil {
-		h.Log.Error("build exitwg spec", "node", s.node.ID, "err", err)
-		exitSpec = &proto.ExitWGSpec{Port: DefaultExitWGPort, CIDR: DefaultExitWGCIDR}
-	}
 	ack, err := proto.NewEnvelope(proto.TypeRegisterAck, env.ID, proto.RegisterAckData{
 		NodeID:        s.node.ID,
 		OverlayIP:     s.node.OverlayIP + "/32",
 		PeersExpected: expected,
-		ExitWG:        exitSpec,
 	})
 	if err != nil {
 		return

@@ -31,8 +31,6 @@ const (
 	TypeRotateCert  = "rotate_cert"
 	TypeConfGet     = "conf_get"
 	TypeConfResult  = "conf_result"
-	TypeExitWGSet   = "exitwg_set"
-	TypeExitWGState = "exitwg_status"
 	TypeError       = "error"
 )
 
@@ -136,35 +134,6 @@ type RegisterAckData struct {
 	NodeID        string     `json:"node_id"`
 	OverlayIP     string     `json:"overlay_ip"`
 	PeersExpected []PeerSpec `json:"peers_expected"`
-	// ExitWG is the authoritative desired state of the node's direct-connect
-	// WG interface (always present so a disable done while the agent was
-	// offline converges on register).
-	ExitWG *ExitWGSpec `json:"exitwg,omitempty"`
-}
-
-// ExitWGPeer is one admin device allowed on the direct-connect WG.
-type ExitWGPeer struct {
-	Pubkey string `json:"pubkey"`
-	IP     string `json:"ip"` // client address, e.g. 10.99.0.2/32
-}
-
-// ExitWGSpec is the full desired state of the direct-connect WG interface
-// (lightpn1): a hub-managed, admin-facing WG server for the operator's own
-// devices, independent of the mesh. Enabled=false tears the device down.
-type ExitWGSpec struct {
-	Enabled bool         `json:"enabled"`
-	Port    int          `json:"port"`
-	CIDR    string       `json:"cidr"` // server address+mask, e.g. 10.99.0.1/24
-	Peers   []ExitWGPeer `json:"peers"`
-}
-
-// ExitWGStateData reports the applied direct-WG state back to the hub,
-// carrying the agent's persistent server public key for client configs.
-type ExitWGStateData struct {
-	Enabled bool   `json:"enabled"`
-	Pubkey  string `json:"pubkey,omitempty"`
-	Port    int    `json:"port,omitempty"`
-	Err     string `json:"err,omitempty"`
 }
 
 // PeerSpec is the full peer description pushed in peer_add/peer_update

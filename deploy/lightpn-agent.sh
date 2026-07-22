@@ -94,10 +94,9 @@ RestartSec=3
 # "no identity" even though it runs as root and the files are present
 # (a foreground root keeps full caps, which is why it worked there).
 # DAC_READ_SEARCH only bypasses read/traverse checks, not write, so the
-# hardening loss is minimal. CAP_NET_RAW is needed by iptables when the
-# direct-connect WG (device exit) sets up NAT.
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+# hardening loss is minimal.
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
 # Hardening. ProtectSystem=full locks /usr, /boot and /etc read-only but
 # leaves /home alone, so the agent reads/writes its identity under the app
 # dir directly. Do NOT use strict + ReadWritePaths=$APP_DIR here: bind-

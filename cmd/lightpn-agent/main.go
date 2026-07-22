@@ -71,7 +71,6 @@ func run(args []string) {
 	a := &agent.Agent{
 		ID:              id,
 		WG:              wg,
-		ExitWG:          agent.NewExitWGManager(*dataDir),
 		Log:             log,
 		WGPort:          *wgPort,
 		HeartbeatPeriod: time.Duration(*heartbeat) * time.Second,
