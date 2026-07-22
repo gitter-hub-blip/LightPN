@@ -169,6 +169,13 @@ func (f *fakeAgent) readLoop(conn net.Conn) {
 		case proto.TypePeerAdd, proto.TypePeerUpdate, proto.TypePeerRemove, proto.TypeRotateWG:
 			ackEnv, _ := proto.NewEnvelope(proto.TypeAck, env.ID, proto.AckData{OK: true})
 			proto.WriteFrame(conn, ackEnv)
+		case proto.TypeExitWGSet:
+			var spec proto.ExitWGSpec
+			json.Unmarshal(env.Data, &spec)
+			res, _ := proto.NewEnvelope(proto.TypeExitWGState, env.ID, proto.ExitWGStateData{
+				Enabled: spec.Enabled, Pubkey: "EXITPUB_" + f.nodeID[:4], Port: spec.Port,
+			})
+			proto.WriteFrame(conn, res)
 		case proto.TypeConfGet:
 			if f.noConf {
 				break
@@ -547,6 +554,96 @@ func TestToolConfRequest(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("confWait not cleaned up: %d left", left)
 	}
+}
+
+// TestExitWGFlow: direct-connect WG lifecycle. register_ack always carries
+// the desired state; enabling pushes exitwg_set to the online agent whose
+// exitwg_status pubkey is stored; client IPs allocate sequentially with
+// duplicate pubkeys rejected; a reconnect reconciles the full spec.
+func TestExitWGFlow(t *testing.T) {
+	h := startHub(t)
+	a := enrollAgent(t, h, "edge-a")
+
+	// Never configured: register_ack still carries a disabled spec.
+	ack := a.connect("PUBKEY_A_1", 51820)
+	if ack.ExitWG == nil || ack.ExitWG.Enabled {
+		t.Fatalf("register_ack exitwg = %+v, want disabled spec", ack.ExitWG)
+	}
+
+	// Enable + push: the agent's exitwg_status pubkey must land in the store.
+	if _, err := h.Store.SetExitWG(a.nodeID, true, 51899); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.PushExitWG(a.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	push := a.waitPush(proto.TypeExitWGSet, 3*time.Second)
+	var spec proto.ExitWGSpec
+	json.Unmarshal(push.Data, &spec)
+	if !spec.Enabled || spec.Port != 51899 || spec.CIDR == "" {
+		t.Fatalf("bad exitwg_set: %+v", spec)
+	}
+	wantPub := "EXITPUB_" + a.nodeID[:4]
+	waitFor(t, 3*time.Second, func() bool {
+		cfg, _ := h.Store.GetExitWG(a.nodeID)
+		return cfg != nil && cfg.Pubkey == wantPub
+	})
+
+	// Client devices: sequential IPs from .2 (server holds .1), dup rejected.
+	p1, err := h.Store.AddExitWGPeer(a.nodeID, "phone", "CLIENTPUB_1", time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := h.Store.AddExitWGPeer(a.nodeID, "laptop", "CLIENTPUB_2", time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1.IP != "10.99.0.2/32" || p2.IP != "10.99.0.3/32" {
+		t.Fatalf("client IPs = %s, %s", p1.IP, p2.IP)
+	}
+	if _, err := h.Store.AddExitWGPeer(a.nodeID, "dup", "CLIENTPUB_1", time.Now().Unix()); err == nil {
+		t.Fatal("duplicate client pubkey must be rejected")
+	}
+	// Freed IP is reused.
+	if err := h.Store.DeleteExitWGPeer(a.nodeID, p1.ID); err != nil {
+		t.Fatal(err)
+	}
+	p3, err := h.Store.AddExitWGPeer(a.nodeID, "tablet", "CLIENTPUB_3", time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p3.IP != "10.99.0.2/32" {
+		t.Fatalf("freed IP not reused: %s", p3.IP)
+	}
+
+	// Reconnect: register_ack reconciles the enabled spec with both peers.
+	a.conn.Close()
+	a.clearPushes()
+	ack = a.connect("PUBKEY_A_2", 51820)
+	if ack.ExitWG == nil || !ack.ExitWG.Enabled || len(ack.ExitWG.Peers) != 2 {
+		t.Fatalf("reconnect exitwg = %+v, want enabled with 2 peers", ack.ExitWG)
+	}
+
+	// Disable converges too.
+	a.clearPushes()
+	if _, err := h.Store.SetExitWG(a.nodeID, false, 51899); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.PushExitWG(a.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for _, p := range a.pushes {
+			if p.Type == proto.TypeExitWGSet {
+				var s proto.ExitWGSpec
+				json.Unmarshal(p.Data, &s)
+				return !s.Enabled
+			}
+		}
+		return false
+	})
 }
 
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {

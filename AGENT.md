@@ -245,6 +245,8 @@ agent 执行后统一回执:
 | GET | `/api/nodes/{id}` | 节点详情,含最近心跳中的完整 peer 表 |
 | GET | `/api/nodes/{id}/metrics?range=1h&step=30s` | 时序数据:`{ts[], cpu[], mem[], rx_rate[], tx_rate[], disk[]}` |
 | GET | `/api/nodes/{id}/toolconf` | 经控制通道实时向 agent 请求(`conf_get`)其 WG 运行时状态与翻墙软件配置;不缓存不落盘,节点离线 409、agent 超时未答 504 |
+| GET/PUT | `/api/nodes/{id}/exitwg` | 直连 WG 配置(开关/端口/网段/服务端公钥/设备列表);PUT 后向在线 agent 推 `exitwg_set` |
+| POST/DELETE | `/api/nodes/{id}/exitwg/peers[/{pid}]` | 添加/移除直连设备;IP 在该节点直连网段内顺序分配,pubkey 去重 |
 | PATCH | `/api/nodes/{id}` | 修改备注名 |
 | DELETE | `/api/nodes/{id}` | 级联删除,顺序:删除该节点全部 link → 向各对端推 `peer_remove` → 向该节点推 `kick` → 证书序列号入吊销名单 → overlay IP 进入冷却池 |
 
@@ -406,4 +408,5 @@ CREATE TABLE ip_cooldown (
 | `kick` | H→A | 清 peer、毁身份、退出 |
 | `rotate_wg` / `rotate_cert` | H→A | 密钥/证书轮换 |
 | `conf_get` / `conf_result` | H→A / A→H | 面板触发的工具配置读取:agent 回传 WG 运行时摘要(无私钥)与自动探测到的翻墙软件配置文件(路径白名单内嵌于 agent,不接受下发路径) |
+| `exitwg_set` / `exitwg_status` | H→A / A→H | 直连 WG(设备直连出口 `lightpn1`)的期望状态下发与应用结果回报(含持久化的服务端公钥);register_ack 恒携带期望状态以保证离线期间的变更收敛 |
 | `error` | 双向 | 统一错误,含错误码 |

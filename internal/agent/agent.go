@@ -43,6 +43,10 @@ type Agent struct {
 	SocksListen string
 	SocksPort   int
 
+	// ExitWG, when non-nil, manages the hub-driven direct-connect WG
+	// interface for the operator's own devices (lightpn1).
+	ExitWG ExitWGManager
+
 	connMu sync.Mutex
 	conn   net.Conn
 
@@ -81,6 +85,15 @@ func (a *Agent) Run() error {
 				a.Log.Error("exit SOCKS server stopped", "err", err)
 			}
 		}()
+	}
+
+	// Restore the direct-connect WG from its persisted spec so the
+	// operator's VPN comes back after a reboot even with the hub down; the
+	// hub overwrites this with authoritative state on every register.
+	if a.ExitWG != nil {
+		if spec, err := loadExitWGSpec(a.ID.Dir); err == nil && spec.Enabled {
+			a.applyExitWG(spec)
+		}
 	}
 
 	backoff := time.Second
@@ -201,6 +214,14 @@ func (a *Agent) register(conn net.Conn, pubkey string, port int) error {
 		}
 		a.Exit.Reconcile(exits)
 	}
+	// Converge the direct-connect WG to the hub's authoritative state and
+	// report the applied result (carrying the persistent server pubkey).
+	if a.ExitWG != nil && ack.ExitWG != nil {
+		st := a.applyExitWG(*ack.ExitWG)
+		if env, err := proto.NewEnvelope(proto.TypeExitWGState, ulid.Make().String(), st); err == nil {
+			a.write(conn, env)
+		}
+	}
 	a.Log.Info("reconciled peers", "count", len(ack.PeersExpected))
 	return nil
 }
@@ -304,6 +325,21 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 		a.Log.Info("certificate rotated", "err", err)
 		return a.ack(conn, env.ID, err)
 
+	case proto.TypeExitWGSet:
+		var spec proto.ExitWGSpec
+		if err := json.Unmarshal(env.Data, &spec); err != nil {
+			return a.ack(conn, env.ID, err)
+		}
+		if a.ExitWG == nil {
+			return a.ack(conn, env.ID, errors.New("exit WG not supported"))
+		}
+		st := a.applyExitWG(spec)
+		res, err := proto.NewEnvelope(proto.TypeExitWGState, env.ID, st)
+		if err != nil {
+			return err
+		}
+		return a.write(conn, res)
+
 	case proto.TypeConfGet:
 		// Panel-triggered read of local network-tool configs (§6.2). The
 		// reply reuses the request ID so the hub can match its waiter.
@@ -321,6 +357,11 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 		// §5.7: clear all kernel peers, destroy identity, exit.
 		if err := a.WG.Teardown(); err != nil {
 			a.Log.Error("teardown", "err", err)
+		}
+		if a.ExitWG != nil {
+			if err := a.ExitWG.Teardown(); err != nil {
+				a.Log.Error("exit WG teardown", "err", err)
+			}
 		}
 		if err := a.ID.Destroy(); err != nil {
 			a.Log.Error("destroy identity", "err", err)

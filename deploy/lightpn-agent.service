@@ -10,9 +10,10 @@ Type=simple
 ExecStart=/usr/local/bin/lightpn-agent --data-dir /var/lib/lightpn/identity
 Restart=always
 RestartSec=3
-# The agent needs CAP_NET_ADMIN to manage the WireGuard device.
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+# CAP_NET_ADMIN manages the WireGuard devices; CAP_NET_RAW is needed by
+# iptables when the direct-connect WG (device exit) sets up NAT.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

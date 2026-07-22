@@ -116,6 +116,10 @@ func (h *Hub) ServeAPI(stop <-chan struct{}) error {
 	mux.Handle("DELETE /api/nodes/{id}", a.auth(a.deleteNode))
 	mux.Handle("POST /api/nodes/{id}/rotate-wg", a.auth(a.rotateWG))
 	mux.Handle("GET /api/nodes/{id}/toolconf", a.auth(a.nodeToolConf))
+	mux.Handle("GET /api/nodes/{id}/exitwg", a.auth(a.getExitWG))
+	mux.Handle("PUT /api/nodes/{id}/exitwg", a.auth(a.putExitWG))
+	mux.Handle("POST /api/nodes/{id}/exitwg/peers", a.auth(a.addExitWGPeer))
+	mux.Handle("DELETE /api/nodes/{id}/exitwg/peers/{pid}", a.auth(a.delExitWGPeer))
 	mux.Handle("POST /api/tokens", a.auth(a.createToken))
 	mux.Handle("GET /api/tokens", a.auth(a.listTokens))
 	mux.Handle("DELETE /api/tokens/{id}", a.auth(a.deleteToken))
@@ -384,6 +388,132 @@ func (a *apiServer) rotateWG(w http.ResponseWriter, r *http.Request) {
 	if err := a.hub.RotateWG(r.PathValue("id")); err != nil {
 		httpErr(w, http.StatusConflict, err.Error())
 		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// ---- direct-connect WG ----
+
+// exitwgJSON is the panel-facing shape of a node's direct-WG state.
+func (a *apiServer) exitwgJSON(nodeID string) (map[string]any, error) {
+	cfg, err := a.hub.Store.GetExitWG(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	peers, err := a.hub.Store.ListExitWGPeers(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	outPeers := []map[string]any{}
+	for _, p := range peers {
+		outPeers = append(outPeers, map[string]any{
+			"id": p.ID, "name": p.Name, "pubkey": p.Pubkey, "ip": p.IP, "created_at": p.CreatedAt,
+		})
+	}
+	return map[string]any{
+		"enabled": cfg.Enabled,
+		"port":    cfg.Port,
+		"cidr":    cfg.CIDR,
+		"pubkey":  cfg.Pubkey,
+		// The host clients dial; "" while the node is offline/unregistered.
+		"endpoint_host": a.hub.ExitWGEndpointHost(nodeID),
+		"peers":         outPeers,
+	}, nil
+}
+
+func (a *apiServer) getExitWG(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.hub.Store.GetNode(id); err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	out, err := a.exitwgJSON(id)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *apiServer) putExitWG(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.hub.Store.GetNode(id); err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+		Port    int  `json:"port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if body.Port == 0 {
+		body.Port = DefaultExitWGPort
+	}
+	if body.Port < 1 || body.Port > 65535 {
+		httpErr(w, http.StatusBadRequest, "invalid port")
+		return
+	}
+	if _, err := a.hub.Store.SetExitWG(id, body.Enabled, body.Port); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := a.hub.PushExitWG(id); err != nil {
+		a.log.Warn("push exitwg", "node", id, "err", err)
+	}
+	out, err := a.exitwgJSON(id)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+// validWGKey reports whether s is a base64-encoded 32-byte key.
+func validWGKey(s string) bool {
+	raw, err := base64.StdEncoding.DecodeString(s)
+	return err == nil && len(raw) == 32
+}
+
+func (a *apiServer) addExitWGPeer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.hub.Store.GetNode(id); err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	var body struct {
+		Name   string `json:"name"`
+		Pubkey string `json:"pubkey"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Name) == "" {
+		httpErr(w, http.StatusBadRequest, "name required")
+		return
+	}
+	if !validWGKey(strings.TrimSpace(body.Pubkey)) {
+		httpErr(w, http.StatusBadRequest, "invalid WireGuard public key")
+		return
+	}
+	p, err := a.hub.Store.AddExitWGPeer(id, strings.TrimSpace(body.Name), strings.TrimSpace(body.Pubkey), time.Now().Unix())
+	if err != nil {
+		httpErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	if err := a.hub.PushExitWG(id); err != nil {
+		a.log.Warn("push exitwg", "node", id, "err", err)
+	}
+	writeJSON(w, map[string]any{"id": p.ID, "name": p.Name, "pubkey": p.Pubkey, "ip": p.IP})
+}
+
+func (a *apiServer) delExitWGPeer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := a.hub.Store.DeleteExitWGPeer(id, r.PathValue("pid")); err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	if err := a.hub.PushExitWG(id); err != nil {
+		a.log.Warn("push exitwg", "node", id, "err", err)
 	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
