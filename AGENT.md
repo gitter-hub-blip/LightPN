@@ -244,6 +244,7 @@ agent 执行后统一回执:
 | GET | `/api/nodes` | 节点列表:`[{id, name, overlay_ip, status, endpoint, agent_version, last_seen, sys_summary}]`,status ∈ online / offline / stale |
 | GET | `/api/nodes/{id}` | 节点详情,含最近心跳中的完整 peer 表 |
 | GET | `/api/nodes/{id}/metrics?range=1h&step=30s` | 时序数据:`{ts[], cpu[], mem[], rx_rate[], tx_rate[], disk[]}` |
+| GET | `/api/nodes/{id}/toolconf` | 经控制通道实时向 agent 请求(`conf_get`)其 WG 运行时状态与翻墙软件配置;不缓存不落盘,节点离线 409、agent 超时未答 504 |
 | PATCH | `/api/nodes/{id}` | 修改备注名 |
 | DELETE | `/api/nodes/{id}` | 级联删除,顺序:删除该节点全部 link → 向各对端推 `peer_remove` → 向该节点推 `kick` → 证书序列号入吊销名单 → overlay IP 进入冷却池 |
 
@@ -404,4 +405,5 @@ CREATE TABLE ip_cooldown (
 | `ack` | A→H | 对推送的统一回执 |
 | `kick` | H→A | 清 peer、毁身份、退出 |
 | `rotate_wg` / `rotate_cert` | H→A | 密钥/证书轮换 |
+| `conf_get` / `conf_result` | H→A / A→H | 面板触发的工具配置读取:agent 回传 WG 运行时摘要(无私钥)与自动探测到的翻墙软件配置文件(路径白名单内嵌于 agent,不接受下发路径) |
 | `error` | 双向 | 统一错误,含错误码 |

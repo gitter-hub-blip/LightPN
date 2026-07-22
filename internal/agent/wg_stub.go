@@ -25,6 +25,9 @@ func NewWGManager() (WGManager, error) {
 	return &stubWG{peerNodes: map[string]string{}, nodeKeys: map[string]string{}}, nil
 }
 
+// wgIfaceName reports the WG device name for conf_result (stub: no device).
+func wgIfaceName() string { return "memory-stub" }
+
 func fakeKey() string {
 	b := make([]byte, 32)
 	rand.Read(b)

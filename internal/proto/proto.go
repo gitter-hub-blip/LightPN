@@ -29,6 +29,8 @@ const (
 	TypeKick        = "kick"
 	TypeRotateWG    = "rotate_wg"
 	TypeRotateCert  = "rotate_cert"
+	TypeConfGet     = "conf_get"
+	TypeConfResult  = "conf_result"
 	TypeError       = "error"
 )
 
@@ -193,6 +195,36 @@ type KickData struct {
 
 type RotateCertData struct {
 	CertPEM string `json:"cert_pem"`
+}
+
+// ConfFile is one network-tool configuration file found on an agent.
+// Content is the raw file text (capped; Truncated set when cut). Err is a
+// per-file read error; a file entry with Err set has empty Content.
+type ConfFile struct {
+	Tool      string `json:"tool"` // xray, sing-box, ...
+	Path      string `json:"path"`
+	ModTime   int64  `json:"mtime"`
+	Size      int64  `json:"size"`
+	Content   string `json:"content,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Err       string `json:"err,omitempty"`
+}
+
+// ConfWG is the agent's WireGuard runtime summary. It deliberately carries
+// no private key material (design invariant 2: the WG private key never
+// leaves agent memory / the kernel device).
+type ConfWG struct {
+	Iface      string         `json:"iface"`
+	Pubkey     string         `json:"pubkey"`
+	ListenPort int            `json:"listen_port"`
+	Peers      []WGPeerStatus `json:"peers"`
+}
+
+// ConfResultData answers a conf_get: WG runtime state plus every proxy-tool
+// config file auto-detected on the node.
+type ConfResultData struct {
+	WG    ConfWG     `json:"wg"`
+	Files []ConfFile `json:"files"`
 }
 
 type ErrorData struct {

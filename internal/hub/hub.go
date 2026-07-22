@@ -3,6 +3,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -29,12 +30,21 @@ type Hub struct {
 	lastWG   map[string]wgIdent  // nodeID -> last known WG material
 	revoked  map[string]bool     // cert serial -> revoked
 	gcDone   map[string]bool     // nodeID -> peers already GC'd from others
+	confWait map[string]confWaiter // conf_get envelope ID -> waiting API call
 
 	subsMu sync.Mutex
 	subs   map[chan Event]bool
 
 	enrollMu    sync.Mutex
 	enrollTries map[string][]time.Time // enroll rate limit, per source IP
+}
+
+// confWaiter is a pending panel request for a node's tool configuration:
+// the API handler blocks on ch until the matching conf_result arrives.
+// nodeID pins the reply to the session that was asked.
+type confWaiter struct {
+	nodeID string
+	ch     chan json.RawMessage
 }
 
 // wgIdent is a node's last-registered ephemeral WG material plus the
@@ -83,6 +93,7 @@ func New(cfg Config, store *Store, ca *pki.CA, log *slog.Logger) (*Hub, error) {
 		lastWG:   map[string]wgIdent{},
 		revoked:  revoked,
 		gcDone:   map[string]bool{},
+		confWait: map[string]confWaiter{},
 		subs:     map[chan Event]bool{},
 	}, nil
 }
@@ -422,6 +433,62 @@ func (h *Hub) RotateWG(id string) error {
 	}
 	s.send(env)
 	return nil
+}
+
+// ErrConfTimeout reports that an agent did not answer conf_get in time.
+var ErrConfTimeout = fmt.Errorf("agent did not answer in time")
+
+// RequestToolConf pushes conf_get to a node and waits for its conf_result
+// (panel-triggered, §6.2). Nothing is cached or persisted: every call is a
+// fresh read from the edge (hub minimal-persistence invariant).
+func (h *Hub) RequestToolConf(id string, timeout time.Duration) (json.RawMessage, error) {
+	h.mu.Lock()
+	s := h.sessions[id]
+	if s == nil {
+		h.mu.Unlock()
+		return nil, fmt.Errorf("node %s is offline", id)
+	}
+	reqID := NewULID()
+	ch := make(chan json.RawMessage, 1)
+	h.confWait[reqID] = confWaiter{nodeID: id, ch: ch}
+	h.mu.Unlock()
+
+	cleanup := func() {
+		h.mu.Lock()
+		delete(h.confWait, reqID)
+		h.mu.Unlock()
+	}
+	env, err := proto.NewEnvelope(proto.TypeConfGet, reqID, struct{}{})
+	if err != nil {
+		cleanup()
+		return nil, err
+	}
+	s.send(env)
+	select {
+	case data := <-ch:
+		cleanup()
+		return data, nil
+	case <-time.After(timeout):
+		cleanup()
+		return nil, ErrConfTimeout
+	}
+}
+
+// handleConfResult delivers an agent's conf_result to the waiting API call.
+// The waiter is keyed by the request's envelope ID and pinned to the node it
+// was sent to, so another session cannot spoof a reply.
+func (h *Hub) handleConfResult(s *session, env *proto.Envelope) {
+	h.mu.Lock()
+	w, ok := h.confWait[env.ID]
+	if ok && w.nodeID == s.node.ID {
+		delete(h.confWait, env.ID)
+	} else {
+		ok = false
+	}
+	h.mu.Unlock()
+	if ok {
+		w.ch <- env.Data
+	}
 }
 
 // ControlBoundAddr reports the control listener's actual address once

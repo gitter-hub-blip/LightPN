@@ -18,6 +18,9 @@ import (
 
 const deviceName = "lightpn0"
 
+// wgIfaceName reports the WG device name for conf_result.
+func wgIfaceName() string { return deviceName }
+
 // linuxWG drives the kernel WireGuard module via wgctrl; interface
 // creation and addressing use iproute2 (the only external dependency).
 type linuxWG struct {

@@ -304,6 +304,16 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 		a.Log.Info("certificate rotated", "err", err)
 		return a.ack(conn, env.ID, err)
 
+	case proto.TypeConfGet:
+		// Panel-triggered read of local network-tool configs (§6.2). The
+		// reply reuses the request ID so the hub can match its waiter.
+		res, err := proto.NewEnvelope(proto.TypeConfResult, env.ID, a.collectToolConf())
+		if err != nil {
+			return err
+		}
+		a.Log.Info("tool conf requested by hub")
+		return a.write(conn, res)
+
 	case proto.TypeKick:
 		var d proto.KickData
 		json.Unmarshal(env.Data, &d)

@@ -115,6 +115,7 @@ func (h *Hub) ServeAPI(stop <-chan struct{}) error {
 	mux.Handle("PATCH /api/nodes/{id}", a.auth(a.patchNode))
 	mux.Handle("DELETE /api/nodes/{id}", a.auth(a.deleteNode))
 	mux.Handle("POST /api/nodes/{id}/rotate-wg", a.auth(a.rotateWG))
+	mux.Handle("GET /api/nodes/{id}/toolconf", a.auth(a.nodeToolConf))
 	mux.Handle("POST /api/tokens", a.auth(a.createToken))
 	mux.Handle("GET /api/tokens", a.auth(a.listTokens))
 	mux.Handle("DELETE /api/tokens/{id}", a.auth(a.deleteToken))
@@ -356,6 +357,27 @@ func (a *apiServer) deleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// nodeToolConf pulls the node's network-tool configs live over the control
+// channel (conf_get). No caching: offline node → 409, silent agent → 504.
+func (a *apiServer) nodeToolConf(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.hub.Store.GetNode(id); err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	data, err := a.hub.RequestToolConf(id, 10*time.Second)
+	if err != nil {
+		if errors.Is(err, ErrConfTimeout) {
+			httpErr(w, http.StatusGatewayTimeout, err.Error())
+			return
+		}
+		httpErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
 }
 
 func (a *apiServer) rotateWG(w http.ResponseWriter, r *http.Request) {

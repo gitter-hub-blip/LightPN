@@ -11,6 +11,8 @@ const state = {
   nodes: [],        // GET /api/nodes
   links: [],        // GET /api/links
   spark: {},        // nodeId -> [{cpu, rx_rate, tx_rate}] recent heartbeats
+  toolconf: null,   // { id, data, loading, err } — survives heartbeat re-renders
+  confShown: new Set(), // indices of currently revealed masked values
   ws: null,
   wsUp: false,
   route: location.hash || "#/nodes",
@@ -288,6 +290,10 @@ function nodeDetailView(id) {
     </div>
     <div class="section-title">当前 Peer</div>
     <div id="peer-table"><div class="empty">加载中…</div></div>
+    <div class="section-title">网络工具配置</div>
+    <div class="hint" style="margin-bottom:8px">实时从节点读取翻墙软件配置与 WireGuard 运行时状态(不含私钥)。敏感字段默认打码,点击可显示。</div>
+    <button id="btn-toolconf" ${n.status === "offline" ? "disabled" : ""}>拉取配置</button>
+    <div id="toolconf-out" style="margin-top:10px"></div>
   `);
 }
 
@@ -466,6 +472,12 @@ function bindNodeDetail(id) {
       catch (e) { toast(e.message); }
     });
 
+  // Toolconf survives the 15s heartbeat re-render; drop it only when the
+  // detail page switches to another node.
+  if (state.toolconf && state.toolconf.id !== id) { state.toolconf = null; state.confShown.clear(); }
+  $("#btn-toolconf").onclick = () => loadToolConf(id);
+  renderToolConf();
+
   loadNodeDetail(id);
 }
 
@@ -500,6 +512,81 @@ async function loadNodeDetail(id) {
         <td class="mono">${esc(p.endpoint || "–")}</td>
       </tr>`).join("")}</table>` : `<div class="empty">该节点当前没有 peer。</div>`;
   } catch (e) { /* node offline / no data */ }
+}
+
+// ---- tool config (conf_get) ----
+
+// Sensitive keys in proxy configs, JSON ("key": "value") and YAML
+// (key: value) forms. Matched values are masked; click to reveal.
+const MASK_RE = /("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\s*:\s*")([^"]*)(")|^([ \t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\s*:[ \t]*)([^#\r\n]+)$/gim;
+
+function maskRender(text) {
+  MASK_RE.lastIndex = 0;
+  let html = "", last = 0, i = 0, m;
+  while ((m = MASK_RE.exec(text))) {
+    html += esc(text.slice(last, m.index));
+    if (m[1] !== undefined) {   // JSON: prefix, value, closing quote
+      html += esc(m[1]) + maskSpan(m[2], i++) + esc(m[3]);
+    } else {                    // YAML: prefix, value
+      html += esc(m[4]) + maskSpan(m[5], i++);
+    }
+    last = m.index + m[0].length;
+  }
+  return html + esc(text.slice(last));
+}
+
+function maskSpan(v, i) {
+  if (!v) return "";
+  const shown = state.confShown.has(i);
+  return `<span class="mask${shown ? " shown" : ""}" data-v="${esc(v)}" data-i="${i}" title="点击显示/隐藏">${shown ? esc(v) : "••••••••"}</span>`;
+}
+
+async function loadToolConf(id) {
+  state.toolconf = { id, loading: true };
+  state.confShown.clear();
+  renderToolConf();
+  try {
+    const data = await api("GET", `/api/nodes/${id}/toolconf`);
+    state.toolconf = { id, data };
+  } catch (e) {
+    state.toolconf = { id, err: e.message };
+  }
+  renderToolConf();
+}
+
+function renderToolConf() {
+  const out = $("#toolconf-out");
+  const tc = state.toolconf;
+  if (!out || !tc) return;
+  if (tc.loading) { out.innerHTML = `<div class="empty">正在从节点拉取…</div>`; return; }
+  if (tc.err) { out.innerHTML = `<div class="empty">拉取失败:${esc(tc.err)}</div>`; return; }
+  const d = tc.data, wg = d.wg || {};
+  let html = `<div class="card" style="margin-bottom:14px">
+    <div class="kv"><span class="k">WG 接口</span><span class="v">${esc(wg.iface || "–")}</span></div>
+    <div class="kv"><span class="k">监听端口</span><span class="v">${wg.listen_port ?? "–"}</span></div>
+    <div class="kv"><span class="k">本机公钥</span><span class="v">${esc(wg.pubkey || "–")}</span></div>
+    <div class="kv"><span class="k">内核 Peer 数</span><span class="v">${(wg.peers || []).length}</span></div>
+  </div>`;
+  const files = d.files || [];
+  if (!files.length) {
+    html += `<div class="empty">未在常见路径检测到翻墙软件配置(xray / sing-box / v2ray / hysteria / trojan-go / mihomo / clash)。</div>`;
+  }
+  for (const f of files) {
+    html += `<div class="confhead"><span class="pill online">${esc(f.tool)}</span>
+      <span class="mono">${esc(f.path)}</span>
+      <span class="hint">${fmtBytes(f.size)} · 修改于 ${fmtAgo(f.mtime)}${f.truncated ? " · 已截断" : ""}</span></div>`;
+    html += f.err
+      ? `<div class="empty">读取失败:${esc(f.err)}</div>`
+      : `<pre class="confbox">${maskRender(f.content || "")}</pre>`;
+  }
+  out.innerHTML = html;
+  out.querySelectorAll(".mask").forEach(el => {
+    el.onclick = () => {
+      const i = Number(el.dataset.i);
+      if (state.confShown.has(i)) { state.confShown.delete(i); el.classList.remove("shown"); el.textContent = "••••••••"; }
+      else { state.confShown.add(i); el.classList.add("shown"); el.textContent = el.dataset.v; }
+    };
+  });
 }
 
 function bindLinks() {

@@ -140,6 +140,17 @@ lightpn-agent --data-dir /var/lib/lightpn/identity --socks-port 1080
 
 **手动/测试**:不依赖 hub 时可用 `--exit-via 100.100.0.3:1080` 直接钉住上游(此时忽略 hub 的出口指令)。
 
+## 在面板查看边缘节点的工具配置
+
+节点详情页的「网络工具配置」区,点击「拉取配置」即经控制通道实时向该 agent 请求:
+
+- **WireGuard 运行时状态**:接口名、监听端口、本机公钥、内核 peer 数 —— 不含私钥(WG 私钥只存在于 agent 内存与内核,设计不变量)。
+- **翻墙软件配置文件**:agent 在内嵌的常见路径白名单中自动探测(xray / sing-box / v2ray / hysteria / trojan-go / mihomo / clash 的标准安装路径),读到什么展示什么。路径白名单编译在 agent 内,hub 无法指定任意路径,故 hub 被攻陷也不能借此读取边缘机器的任意文件。
+
+安全须知:配置中的敏感字段(私钥/UUID/密码等)在面板中**默认打码、点击才显示**,但内容是明文经 Cloudflare Tunnel 送达浏览器的 —— Cloudflare 在其边缘可见面板明文。接受此暴露面的前提是你信任 Cloudflare(与本项目威胁模型一致);介意者请勿在面板拉取配置,改用 SSH 查看。
+
+每次拉取都是现场读取,hub 不缓存、不落盘;节点离线时不可查(HTTP 409),agent 超过 10 秒未响应报超时(HTTP 504)。
+
 > 说明:数据面出口依赖内核 WireGuard,仅 Linux 生效;非 Linux 平台 agent 用内存桩,SOCKS 切换逻辑仍可跑通用于开发。
 
 ## 运维要点

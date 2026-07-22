@@ -60,7 +60,8 @@ type fakeAgent struct {
 	keyPEM    string
 	certPEM   string
 	caPEM     string
-	socksPort int // reported in register (exit SOCKS advertisement)
+	socksPort int  // reported in register (exit SOCKS advertisement)
+	noConf    bool // when true, ignore conf_get (timeout testing)
 
 	conn net.Conn
 
@@ -168,6 +169,17 @@ func (f *fakeAgent) readLoop(conn net.Conn) {
 		case proto.TypePeerAdd, proto.TypePeerUpdate, proto.TypePeerRemove, proto.TypeRotateWG:
 			ackEnv, _ := proto.NewEnvelope(proto.TypeAck, env.ID, proto.AckData{OK: true})
 			proto.WriteFrame(conn, ackEnv)
+		case proto.TypeConfGet:
+			if f.noConf {
+				break
+			}
+			res, _ := proto.NewEnvelope(proto.TypeConfResult, env.ID, proto.ConfResultData{
+				WG: proto.ConfWG{Iface: "lightpn0", Pubkey: "PUBKEY_TEST", ListenPort: 51820},
+				Files: []proto.ConfFile{
+					{Tool: "xray", Path: "/usr/local/etc/xray/config.json", Content: `{"id":"uuid-here"}`},
+				},
+			})
+			proto.WriteFrame(conn, res)
 		}
 	}
 }
@@ -493,6 +505,47 @@ func TestExitRequiresSocksAdvertisement(t *testing.T) {
 	json.Unmarshal(pu.Data, &spec)
 	if spec.Exit {
 		t.Fatalf("exit must not activate without SOCKS advertisement: %+v", spec)
+	}
+}
+
+// TestToolConfRequest: the panel-triggered conf_get round trip. An online
+// agent's conf_result is returned to the API caller; an offline node errors
+// immediately; a silent agent errors with ErrConfTimeout after the deadline.
+func TestToolConfRequest(t *testing.T) {
+	h := startHub(t)
+	a := enrollAgent(t, h, "edge-a")
+	a.connect("PUBKEY_A_1", 51820)
+
+	data, err := h.RequestToolConf(a.nodeID, 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res proto.ConfResultData
+	if err := json.Unmarshal(data, &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.WG.Pubkey != "PUBKEY_TEST" || len(res.Files) != 1 || res.Files[0].Tool != "xray" {
+		t.Fatalf("bad conf result: %+v", res)
+	}
+
+	// Offline node: fail fast, no waiter left behind.
+	b := enrollAgent(t, h, "edge-b")
+	if _, err := h.RequestToolConf(b.nodeID, time.Second); err == nil {
+		t.Fatal("offline node must error")
+	}
+
+	// Silent agent: timeout, and the waiter map must be cleaned up.
+	c := enrollAgent(t, h, "edge-c")
+	c.noConf = true
+	c.connect("PUBKEY_C_1", 51820)
+	if _, err := h.RequestToolConf(c.nodeID, 300*time.Millisecond); err != ErrConfTimeout {
+		t.Fatalf("want ErrConfTimeout, got %v", err)
+	}
+	h.mu.Lock()
+	left := len(h.confWait)
+	h.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("confWait not cleaned up: %d left", left)
 	}
 }
 

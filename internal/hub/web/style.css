@@ -135,3 +135,15 @@ canvas { display: block; width: 100%; }
   padding: 10px 18px; z-index: 200; font-size: 13px;
 }
 .empty { color: var(--muted); padding: 30px; text-align: center; }
+
+/* tool config viewer */
+.confhead { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; font-size: 13px; }
+.confbox {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.5;
+  overflow-x: auto; max-height: 420px; overflow-y: auto; white-space: pre;
+}
+.mask { background: var(--panel2); border: 1px dashed var(--border); border-radius: 4px;
+  padding: 0 6px; cursor: pointer; color: var(--muted); user-select: none; }
+.mask.shown { color: var(--warn); border-style: solid; user-select: text; }
+.mask:hover { border-color: var(--accent); }
