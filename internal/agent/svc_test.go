@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"testing"
 
@@ -36,6 +37,31 @@ func sealCmd(t *testing.T, dir, password, action, alias string, ts int64) proto.
 	}
 }
 
+// fakeSvc is a platform-independent in-memory SvcManager for tests. The real
+// NewSvcManager() is systemd-backed on Linux, so using it here would try to
+// drive units that don't exist on a CI runner; these tests only exercise the
+// command auth / alias / replay logic, not systemd itself.
+type fakeSvc struct{ active map[string]bool }
+
+func newFakeSvc() *fakeSvc { return &fakeSvc{active: map[string]bool{}} }
+
+func (f *fakeSvc) Exists(string) bool { return true }
+func (f *fakeSvc) Status(unit string) (string, string) {
+	if f.active[unit] {
+		return "active", "enabled"
+	}
+	return "inactive", "disabled"
+}
+func (f *fakeSvc) Do(action, unit string) error {
+	if !svcActions[action] {
+		return errTestBadAction
+	}
+	f.active[unit] = action != "stop"
+	return nil
+}
+
+var errTestBadAction = errors.New("bad action")
+
 func svcTestAgent(t *testing.T) (*Agent, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -45,7 +71,7 @@ func svcTestAgent(t *testing.T) (*Agent, string) {
 	if err := AddSvc(dir, "ssrust", "shadowsocks-rust.service"); err != nil {
 		t.Fatal(err)
 	}
-	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: NewSvcManager()}
+	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: newFakeSvc()}
 	return a, dir
 }
 
@@ -121,7 +147,7 @@ func TestSvcActionUnknownAlias(t *testing.T) {
 func TestSvcActionNoViewKey(t *testing.T) {
 	dir := t.TempDir()
 	AddSvc(dir, "ssrust", "shadowsocks-rust.service")
-	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: NewSvcManager()}
+	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: newFakeSvc()}
 	// A command sealed under any key can't validate against an absent view key.
 	res := a.handleSvcAction(proto.SvcActionData{Nonce: "AAAAAAAAAAAAAAAA", CT: "AAAA"}, 1_000_000)
 	if res.OK {
@@ -159,7 +185,7 @@ func TestSvcRegValidation(t *testing.T) {
 func TestSvcStatusRequiresViewKey(t *testing.T) {
 	dir := t.TempDir()
 	AddSvc(dir, "ssrust", "shadowsocks-rust.service")
-	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: NewSvcManager()}
+	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: newFakeSvc()}
 	if got := a.collectSvcStatus(); got != nil {
 		// collectSvcStatus itself doesn't gate on the key, but sealToolConf
 		// only calls it on the encrypted path; assert the registry loads.
