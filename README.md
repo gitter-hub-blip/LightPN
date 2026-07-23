@@ -145,7 +145,7 @@ lightpn-agent --data-dir /var/lib/lightpn/identity --socks-port 1080
 节点详情页的「网络工具配置」区,点击「拉取配置」即经控制通道实时向该 agent 请求:
 
 - **WireGuard 运行时状态**:接口名、监听端口、本机公钥、内核 peer 数 —— 不含私钥(WG 私钥只存在于 agent 内存与内核,设计不变量)。
-- **翻墙软件配置文件**:agent 在内嵌的常见路径白名单中自动探测(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks-rust / mihomo / clash 的标准安装路径),读到什么展示什么。路径白名单编译在 agent 内,hub 无法指定任意路径,故 hub 被攻陷也不能借此读取边缘机器的任意文件。
+- **翻墙软件配置文件**:agent 在内嵌的常见路径白名单中自动探测(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks-rust / mihomo / clash / caddy(naive)/ naiveproxy 的标准安装路径),读到什么展示什么;另加**你在该节点上登记过配置路径的服务**(见「远程开关翻墙服务」——登记项为 unit + 别名 + 可选配置路径,内置探测覆盖不到的软件靠登记变相兼容)。无论内置白名单还是登记路径都只存在 agent 本地,hub 无法指定任意路径,故 hub 被攻陷也不能借此读取边缘机器的任意文件。登记路径读取失败时面板会显示具体错误(路径不存在/权限不足),便于排查。
 
 安全须知:配置中的敏感字段(私钥/UUID/密码等)在面板中**默认打码、点击才显示**,但默认情况下内容是明文经 Cloudflare Tunnel 送达浏览器的 —— Cloudflare 在其边缘可见面板明文。不接受此暴露面时,给节点设置**配置查看密码**(下节)。
 
@@ -162,15 +162,15 @@ lightpn-agent --data-dir /var/lib/lightpn/identity --socks-port 1080
 
 ### 远程开关翻墙服务(可选,需已设查看密码)
 
-给某台 edge 的 systemd 服务登记一个别名后,面板即可远程 start/stop/restart 它 —— 用来远程重启抽风的 xray、或临时停用某个节点的代理。
+给某台 edge 的 systemd 服务登记一个别名后,面板即可远程 start/stop/restart 它 —— 用来远程重启抽风的 xray、或临时停用某个节点的代理。登记时还可附上该软件配置文件的绝对路径,面板「拉取配置」会一并显示该文件(同样走打码/端到端加密流程)。
 
 登记(在 edge 上,部署脚本菜单「远程开关服务」或直接 CLI):
 
 ```
-lightpn-agent svc-add          # 交互式:从探测到的常见 unit 里选,或手输,再起个别名
-lightpn-agent svc-add --unit shadowsocks-rust.service --alias ssrust
+lightpn-agent svc-add          # 交互式:选/输 unit,起别名,可选填配置文件路径
+lightpn-agent svc-add --unit caddy.service --alias naive --conf /etc/caddy/Caddyfile
 lightpn-agent svc-list
-lightpn-agent svc-del --alias ssrust
+lightpn-agent svc-del --alias naive
 ```
 
 安全模型(与查看密码同源,刻意设计成 hub 攻陷也无法滥用):

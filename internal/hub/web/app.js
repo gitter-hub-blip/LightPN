@@ -164,6 +164,7 @@ function handleEvent(msg) {
   switch (msg.ev) {
     case "heartbeat": {
       const n = state.nodes.find(n => n.id === d.node_id);
+      const cameOnline = n && n.status !== "online"; // 上线属结构性变化(按钮态等)
       if (n) {
         n.status = "online";
         n.last_seen = Math.floor(Date.now() / 1000);
@@ -172,8 +173,12 @@ function handleEvent(msg) {
       const sp = state.spark[d.node_id] = state.spark[d.node_id] || [];
       sp.push(summarize(d.sys));
       if (sp.length > 40) sp.shift();
-      if (state.route === "#/nodes") render();
-      if (state.route.startsWith("#/node/") && state.route.slice(7) === d.node_id) render();
+      // 心跳高频,只做局部 DOM 更新;整页重建会造成周期性闪跳。
+      if (state.route === "#/nodes") {
+        cameOnline ? render() : patchNodeCard(d.node_id);
+      } else if (state.route.startsWith("#/node/") && state.route.slice(7) === d.node_id) {
+        cameOnline ? render() : patchNodeDetail(d.node_id);
+      }
       break;
     }
     case "node_status":
@@ -244,18 +249,17 @@ function loginView() {
 function nodesView() {
   const cards = state.nodes.map(n => {
     const s = n.sys_summary;
-    const sp = state.spark[n.id] || [];
     return `
-    <div class="card">
+    <div class="card" data-node-card="${n.id}">
       <div class="head">
-        <div class="dot ${n.status}"></div>
+        <div class="dot ${n.status}" data-f="dot"></div>
         <a class="name" href="#/node/${n.id}">${esc(n.name)}</a>
-        <span class="pill ${n.status}" style="margin-left:auto">${n.status}</span>
+        <span class="pill ${n.status}" data-f="pill" style="margin-left:auto">${n.status}</span>
       </div>
       <div class="kv"><span class="k">Overlay IP</span><span class="v">${esc(n.overlay_ip)}</span></div>
       <div class="kv"><span class="k">Endpoint</span><span class="v">${esc(n.endpoint || "–")}</span></div>
-      <div class="kv"><span class="k">最近心跳</span><span class="v">${fmtAgo(n.last_seen)}</span></div>
-      <div class="kv"><span class="k">CPU / 内存</span><span class="v">${s ? s.cpu.toFixed(1) + "% / " + s.mem.toFixed(0) + "%" : "–"}</span></div>
+      <div class="kv"><span class="k">最近心跳</span><span class="v" data-f="last-seen" ${n.last_seen ? `data-ago="${n.last_seen}"` : ""}>${fmtAgo(n.last_seen)}</span></div>
+      <div class="kv"><span class="k">CPU / 内存</span><span class="v" data-f="cpumem">${s ? s.cpu.toFixed(1) + "% / " + s.mem.toFixed(0) + "%" : "–"}</span></div>
       <div class="sparkrow">
         <div><div class="lbl">CPU</div><canvas data-spark="${n.id}:cpu"></canvas></div>
         <div><div class="lbl">内存</div><canvas data-spark="${n.id}:mem"></canvas></div>
@@ -276,7 +280,7 @@ function nodeDetailView(id) {
   if (!n) return layout(`<div class="empty">节点不存在</div>`);
   return layout(`
     <div class="page-head">
-      <h1><span class="dot ${n.status}" style="display:inline-block;margin-right:8px"></span>${esc(n.name)}
+      <h1><span class="dot ${n.status}" data-f="detail-dot" style="display:inline-block;margin-right:8px"></span>${esc(n.name)}
         <span class="hint mono" style="margin-left:10px">${esc(n.overlay_ip)} · ${esc(n.id)}</span></h1>
       <div style="display:flex;gap:8px">
         <button id="btn-rename">改名</button>
@@ -338,7 +342,7 @@ function linksView() {
       <td>${esc(nodeName(l.a))} ⇄ ${esc(nodeName(l.b))}</td>
       <td><span class="pill ${l.status}">${l.status}</span>${l.status === "degraded" ? `<div class="hint">双方已下发但无握手 —— 检查 WG UDP 端口是否放行</div>` : ""}</td>
       <td>${exitCell(l)}</td>
-      <td class="mono">${l.last_handshake ? fmtAgo(l.last_handshake) : "–"}</td>
+      <td class="mono" ${l.last_handshake ? `data-ago="${l.last_handshake}"` : ""}>${l.last_handshake ? fmtAgo(l.last_handshake) : "–"}</td>
       <td class="mono">↓${fmtRate(l.rx_rate)} ↑${fmtRate(l.tx_rate)}</td>
       <td><button class="danger" data-del-link="${l.id}">删除</button></td>
     </tr>`).join("");
@@ -437,14 +441,59 @@ function bindCommon() {
   };
 }
 
-function bindNodes() {
-  $("#btn-add-node").onclick = addNodeModal;
-  document.querySelectorAll("[data-spark]").forEach(c => {
+function drawSparks(root) {
+  const css = getComputedStyle(document.documentElement);
+  root.querySelectorAll("[data-spark]").forEach(c => {
     const [id, kind] = c.dataset.spark.split(":");
     const sp = (state.spark[id] || []).filter(Boolean);
-    const css = getComputedStyle(document.documentElement);
     if (kind === "cpu") drawSpark(c, sp.map(s => s.cpu), css.getPropertyValue("--accent").trim(), 100);
     else drawSpark(c, sp.map(s => s.mem), css.getPropertyValue("--ok").trim(), 100);
+  });
+}
+
+function bindNodes() {
+  $("#btn-add-node").onclick = addNodeModal;
+  drawSparks(document);
+}
+
+// ---- heartbeat patching ----
+// 心跳只做局部更新,不整页重建 innerHTML —— 整页重建会让滚动位置、图表
+// 画布和 peer 表在每个心跳窗口闪跳一次(此前的问题)。结构性变化(新
+// 节点出现、上下线切换)仍走整页 render。
+
+// 列表页:原位刷新一张节点卡片的状态与两条 sparkline。
+function patchNodeCard(id) {
+  const n = state.nodes.find(n => n.id === id);
+  const card = document.querySelector(`[data-node-card="${CSS.escape(id)}"]`);
+  if (!n || !card) { render(); return; } // 新节点还没有卡片 → 整页重建
+  const f = sel => card.querySelector(`[data-f="${sel}"]`);
+  const dot = f("dot"), pill = f("pill"), ls = f("last-seen"), cm = f("cpumem");
+  if (dot) dot.className = "dot " + n.status;
+  if (pill) { pill.className = "pill " + n.status; pill.textContent = n.status; }
+  if (ls) { ls.dataset.ago = n.last_seen; ls.textContent = fmtAgo(n.last_seen); }
+  const s = n.sys_summary;
+  if (cm) cm.textContent = s ? s.cpu.toFixed(1) + "% / " + s.mem.toFixed(0) + "%" : "–";
+  drawSparks(card);
+}
+
+// 详情页:心跳只更新标题状态点;图表与 peer 表节流原位刷新(drawChart
+// 在既有画布上重画,peer 表拿到数据后才替换内容,不出现「加载中」闪烁)。
+function patchNodeDetail(id) {
+  const n = state.nodes.find(n => n.id === id);
+  const dot = document.querySelector('[data-f="detail-dot"]');
+  if (!n || !dot) { render(); return; }
+  dot.className = "dot " + n.status;
+  const now = Date.now();
+  if (now - (state.detailRefreshedAt || 0) >= 12000) {
+    state.detailRefreshedAt = now;
+    loadNodeDetail(id);
+  }
+}
+
+// 「x 分钟前」文本刷新:只改带 data-ago 的元素,不动其余 DOM。
+function patchAgoTexts() {
+  document.querySelectorAll("[data-ago]").forEach(el => {
+    el.textContent = fmtAgo(+el.dataset.ago);
   });
 }
 
@@ -480,6 +529,7 @@ function bindNodeDetail(id) {
   $("#btn-toolconf").onclick = () => loadToolConf(id);
   renderToolConf();
 
+  state.detailRefreshedAt = Date.now(); // 心跳侧的节流刷新以此为基准
   loadNodeDetail(id);
 }
 
@@ -509,7 +559,7 @@ async function loadNodeDetail(id) {
       <tr><th>对端</th><th>最近握手</th><th>累计流量</th><th>Endpoint</th></tr>
       ${peers.map(p => `<tr>
         <td>${esc(nodeName(p.peer_node_id))}</td>
-        <td class="mono">${p.last_handshake_ts ? fmtAgo(p.last_handshake_ts) : "无"}</td>
+        <td class="mono" ${p.last_handshake_ts ? `data-ago="${p.last_handshake_ts}"` : ""}>${p.last_handshake_ts ? fmtAgo(p.last_handshake_ts) : "无"}</td>
         <td class="mono">↓${fmtBytes(p.rx_bytes)} ↑${fmtBytes(p.tx_bytes)}</td>
         <td class="mono">${esc(p.endpoint || "–")}</td>
       </tr>`).join("")}</table>` : `<div class="empty">该节点当前没有 peer。</div>`;
@@ -518,21 +568,31 @@ async function loadNodeDetail(id) {
 
 // ---- tool config (conf_get) ----
 
-// Sensitive keys in proxy configs, JSON ("key": "value") and YAML
-// (key: value) forms. Matched values are masked; click to reveal.
-// 与 internal/agent/viewkey.go 的 maskRE 保持同步(agent 端用它生成加密
-// 节点的打码预览,两侧匹配行为一致才能保证打码位索引对齐)。
-const MASK_RE = /("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\s*:\s*")([^"]*)(")|^([ \t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\s*:[ \t]*)([^#\r\n]+)$/gim;
+// Sensitive values in proxy configs, four forms: JSON ("key": "value"),
+// YAML (key: value), Caddyfile forward_proxy (basic_auth user pass) and
+// URL userinfo (scheme://user:pass@host)。Matched values are masked; click
+// to reveal. 与 internal/agent/viewkey.go 的 maskRE 保持同步 —— 分支相同、
+// 顺序相同(agent 端用它生成加密节点的打码预览,两侧匹配行为一致才能保证
+// 打码位索引对齐)。
+const MASK_RE = new RegExp(
+  '("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\\s*:\\s*")([^"]*)(")'
+  + '|^([ \\t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\\s*:[ \\t]*)([^#\\r\\n]+)$'
+  + '|^([ \\t]*basic_?auth[ \\t]+\\S+[ \\t]+)(\\S+)'
+  + '|(:\\/\\/[^:@\\/\\s"\']+:)([^@\\/\\s"\']+)(@)', "gim");
 
 function maskRender(text) {
   MASK_RE.lastIndex = 0;
   let html = "", last = 0, i = 0, m;
   while ((m = MASK_RE.exec(text))) {
     html += esc(text.slice(last, m.index));
-    if (m[1] !== undefined) {   // JSON: prefix, value, closing quote
+    if (m[1] !== undefined) {          // JSON: prefix, value, closing quote
       html += esc(m[1]) + maskSpan(m[2], i++) + esc(m[3]);
-    } else {                    // YAML: prefix, value
+    } else if (m[4] !== undefined) {   // YAML: prefix, value
       html += esc(m[4]) + maskSpan(m[5], i++);
+    } else if (m[6] !== undefined) {   // Caddyfile basic_auth: prefix, password
+      html += esc(m[6]) + maskSpan(m[7], i++);
+    } else {                           // URL userinfo: "://user:", password, "@"
+      html += esc(m[8]) + maskSpan(m[9], i++) + esc(m[10]);
     }
     last = m.index + m[0].length;
   }
@@ -782,15 +842,16 @@ function renderToolConf() {
     <div class="kv"><span class="k">本机公钥</span><span class="v">${esc(wg.pubkey || "–")}</span></div>
     <div class="kv"><span class="k">内核 Peer 数</span><span class="v">${(wg.peers || []).length}</span></div>
   </div>`;
+  const files = d.files || [];
   const encrypted = d.enc && !d.unlocked; // 仍处于打码预览态
-  if (encrypted) {
+  if (encrypted && files.length) {
     html += `<div class="hint" style="margin-bottom:10px">🔒 该节点已启用配置查看密码:下方为打码预览,敏感值端到端加密 —— 点击任一 •••••••• 输入密码解密。</div>`;
   }
-  const files = d.files || [];
   if (!files.length) {
-    html += encrypted
-      ? `<div class="empty"><a href="#" id="conf-unlock">配置已加密,点击输入查看密码解锁</a></div>`
-      : `<div class="empty">未在常见路径检测到翻墙软件配置(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks-rust / mihomo / clash)。</div>`;
+    // 注意:密文里装的和预览是同一份数据,files 为空时输密码解开也是空 ——
+    // 所以这里不提供“解锁”入口,直接说明原因与出路。
+    html += `<div class="empty">节点上未检测到配置文件:内置常见路径(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks / mihomo / clash / caddy / naiveproxy)均未命中。
+      配置在其他位置时,可在节点上运行部署脚本菜单「远程开关服务」(或 <span class="mono">lightpn-agent svc-add</span>)登记 unit + 配置文件路径,登记后重新拉取即可显示。</div>`;
   }
   for (const f of files) {
     html += `<div class="confhead"><span class="pill online">${esc(f.tool)}</span>
@@ -803,8 +864,6 @@ function renderToolConf() {
   html += renderSvcCard(d);
   out.innerHTML = html;
   bindSvcCard(tc.id);
-  const unlock = $("#conf-unlock", out);
-  if (unlock) unlock.onclick = e => { e.preventDefault(); unlockToolConf(); };
   out.querySelectorAll(".mask").forEach(el => {
     el.onclick = () => {
       const i = Number(el.dataset.i);
@@ -852,6 +911,7 @@ window.addEventListener("hashchange", () => { state.route = location.hash || "#/
     connectWS();
   } catch (e) { state.authed = false; }
   render();
-  // periodic re-render so "x 分钟前" stays fresh even without events
-  setInterval(() => { if (state.authed && state.route === "#/nodes") render(); }, 30000);
+  // 周期性刷新「x 分钟前」文本:只改带 data-ago 的元素,不整页重建
+  // (此前这里每 30s render() 一次,同样会造成页面闪跳)。
+  setInterval(() => { if (state.authed) patchAgoTexts(); }, 30000);
 })();

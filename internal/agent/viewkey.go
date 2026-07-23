@@ -148,10 +148,18 @@ func (vk *viewKey) seal(plainJSON []byte) (*proto.ConfEnc, error) {
 	}, nil
 }
 
-// maskRE mirrors MASK_RE in web/app.js — the two MUST stay in sync so the
-// agent-side preview masks exactly what the panel would. JSON ("key": "v")
-// and YAML (key: v) forms; the trailing (\r?) group preserves CRLF files.
-var maskRE = regexp.MustCompile(`(?im)("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\s*:\s*")([^"]*)(")|^([ \t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\s*:[ \t]*)([^#\r\n]+?)(\r?)$`)
+// maskRE mirrors MASK_RE in web/app.js — the two MUST stay in sync (same
+// alternatives in the same order) so the agent-side preview masks exactly
+// what the panel would and the click-to-reveal indices line up. Four forms:
+// JSON ("key": "v"), YAML (key: v, trailing (\r?) preserves CRLF files),
+// Caddyfile forward_proxy (basic_auth user pass — masks the password token),
+// and URL userinfo (scheme://user:pass@host — naive configs embed creds in
+// proxy URLs under non-secret keys like "proxy").
+var maskRE = regexp.MustCompile(`(?im)` +
+	`("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\s*:\s*")([^"]*)(")` +
+	`|^([ \t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\s*:[ \t]*)([^#\r\n]+?)(\r?)$` +
+	`|^([ \t]*basic_?auth[ \t]+\S+[ \t]+)(\S+)` +
+	`|(://[^:@/\s"']+:)([^@/\s"']+)(@)`)
 
 const maskDots = "••••••••"
 
@@ -163,16 +171,24 @@ func maskSecrets(text string) string {
 	last := 0
 	for _, m := range maskRE.FindAllStringSubmatchIndex(text, -1) {
 		b.WriteString(text[last:m[0]])
-		if m[2] >= 0 { // JSON: prefix, value, closing quote
+		switch {
+		case m[2] >= 0: // JSON: prefix, value, closing quote
 			b.WriteString(text[m[2]:m[3]])
 			if m[5] > m[4] {
 				b.WriteString(maskDots)
 			}
 			b.WriteString(text[m[6]:m[7]])
-		} else { // YAML: prefix, value, optional \r
+		case m[8] >= 0: // YAML: prefix, value, optional \r
 			b.WriteString(text[m[8]:m[9]])
 			b.WriteString(maskDots)
 			b.WriteString(text[m[12]:m[13]])
+		case m[14] >= 0: // Caddyfile basic_auth: prefix, password token
+			b.WriteString(text[m[14]:m[15]])
+			b.WriteString(maskDots)
+		default: // URL userinfo: "://user:", password, "@"
+			b.WriteString(text[m[18]:m[19]])
+			b.WriteString(maskDots)
+			b.WriteString(text[m[22]:m[23]])
 		}
 		last = m[1]
 	}

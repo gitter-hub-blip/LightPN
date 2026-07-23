@@ -182,6 +182,18 @@ func TestMaskSecrets(t *testing.T) {
 		{"no secrets untouched",
 			"listen: 0.0.0.0\nmode: tcp\n",
 			"listen: 0.0.0.0\nmode: tcp\n"},
+		{"caddyfile forward_proxy basic_auth",
+			":443 {\n  forward_proxy {\n    basic_auth alice hunter2\n    hide_ip\n  }\n}\n",
+			":443 {\n  forward_proxy {\n    basic_auth alice " + maskDots + "\n    hide_ip\n  }\n}\n"},
+		{"caddy basicauth variant",
+			"basicauth bob JDJhJDE0JEdG\n",
+			"basicauth bob " + maskDots + "\n"},
+		{"url userinfo (naive proxy field)",
+			`{"proxy": "https://user:s3cret@example.com"}`,
+			`{"proxy": "https://user:` + maskDots + `@example.com"}`},
+		{"url without creds untouched",
+			`{"listen": "socks://127.0.0.1:1080"}`,
+			`{"listen": "socks://127.0.0.1:1080"}`},
 	}
 	for _, c := range cases {
 		if got := maskSecrets(c.in); got != c.want {

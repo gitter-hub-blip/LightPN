@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"strings"
 
 	"github.com/gitter-hub-blip/lightpn/internal/proto"
 )
@@ -16,7 +17,9 @@ const (
 // toolConfCandidates are the well-known config locations of common proxy
 // tools. Auto-detection only: the agent reads exactly these paths and never
 // takes a path from the wire, so a compromised hub cannot turn conf_get
-// into an arbitrary-file read. Package-level so tests can substitute it.
+// into an arbitrary-file read. Tools at other locations are covered by the
+// svc registry's per-entry conf path (svc-add, local CLI only).
+// Package-level so tests can substitute it.
 var toolConfCandidates = []struct{ tool, path string }{
 	{"xray", "/usr/local/etc/xray/config.json"},
 	{"xray", "/etc/xray/config.json"},
@@ -32,12 +35,16 @@ var toolConfCandidates = []struct{ tool, path string }{
 	{"shadowsocks", "/etc/shadowsocks/config.json"},
 	{"mihomo", "/etc/mihomo/config.yaml"},
 	{"clash", "/etc/clash/config.yaml"},
+	{"caddy", "/etc/caddy/Caddyfile"}, // naive 常经 caddy forward_proxy 部署
+	{"naiveproxy", "/etc/naiveproxy/config.json"},
 }
 
 // collectToolConf answers conf_get: the WG runtime summary (no private key,
-// invariant 2) plus every candidate config file that exists. Missing paths
-// are silently skipped; unreadable ones are reported with Err so the panel
-// can distinguish "not installed" from "permission denied".
+// invariant 2), every candidate config file that exists, and every conf path
+// registered via svc-add. Missing candidate paths are silently skipped (tool
+// not installed); a registered path was promised by the operator, so its
+// stat/read failure is reported with Err — the panel can then distinguish
+// "not installed" from "path wrong / permission denied".
 func (a *Agent) collectToolConf() proto.ConfResultData {
 	out := proto.ConfResultData{
 		WG: proto.ConfWG{
@@ -50,12 +57,45 @@ func (a *Agent) collectToolConf() proto.ConfResultData {
 		out.WG.Peers = peers
 	}
 
-	total := 0
+	type candidate struct {
+		tool, path string
+		registered bool
+	}
+	cands := make([]candidate, 0, len(toolConfCandidates)+4)
 	for _, c := range toolConfCandidates {
-		fi, err := os.Stat(c.path)
-		if err != nil || fi.IsDir() {
+		cands = append(cands, candidate{c.tool, c.path, false})
+	}
+	if a.ID != nil {
+		if reg, err := LoadSvcReg(a.ID.Dir); err == nil {
+			for _, e := range reg {
+				if e.Conf != "" {
+					cands = append(cands, candidate{e.Alias, e.Conf, true})
+				}
+			}
+		} else if a.Log != nil {
+			a.Log.Warn("services.json unreadable, registered conf paths skipped", "err", err)
+		}
+	}
+
+	total := 0
+	seen := map[string]bool{} // paths already emitted (registry may repeat a builtin)
+	for _, c := range cands {
+		if seen[c.path] {
 			continue
 		}
+		fi, err := os.Stat(c.path)
+		if err != nil || fi.IsDir() {
+			if c.registered {
+				msg := "登记的是目录,目前只支持单个文件"
+				if err != nil {
+					msg = err.Error()
+				}
+				out.Files = append(out.Files, proto.ConfFile{Tool: c.tool, Path: c.path, Err: msg})
+				seen[c.path] = true
+			}
+			continue
+		}
+		seen[c.path] = true
 		f := proto.ConfFile{Tool: c.tool, Path: c.path, ModTime: fi.ModTime().Unix(), Size: fi.Size()}
 		switch data, err := os.ReadFile(c.path); {
 		case err != nil:
@@ -76,6 +116,16 @@ func (a *Agent) collectToolConf() proto.ConfResultData {
 		if total >= confTotalCap {
 			break
 		}
+	}
+	if a.Log != nil {
+		paths := make([]string, len(out.Files))
+		for i, f := range out.Files {
+			paths[i] = f.Path
+			if f.Err != "" {
+				paths[i] += "(err)"
+			}
+		}
+		a.Log.Info("tool conf collected", "files", len(out.Files), "paths", strings.Join(paths, " "))
 	}
 	return out
 }

@@ -68,7 +68,7 @@ func svcTestAgent(t *testing.T) (*Agent, string) {
 	if err := SetViewPassword(dir, "pw"); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddSvc(dir, "ssrust", "shadowsocks-rust.service"); err != nil {
+	if err := AddSvc(dir, "ssrust", "shadowsocks-rust.service", ""); err != nil {
 		t.Fatal(err)
 	}
 	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: newFakeSvc()}
@@ -146,7 +146,7 @@ func TestSvcActionUnknownAlias(t *testing.T) {
 // key means no command can be authenticated.
 func TestSvcActionNoViewKey(t *testing.T) {
 	dir := t.TempDir()
-	AddSvc(dir, "ssrust", "shadowsocks-rust.service")
+	AddSvc(dir, "ssrust", "shadowsocks-rust.service", "")
 	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: newFakeSvc()}
 	// A command sealed under any key can't validate against an absent view key.
 	res := a.handleSvcAction(proto.SvcActionData{Nonce: "AAAAAAAAAAAAAAAA", CT: "AAAA"}, 1_000_000)
@@ -155,28 +155,34 @@ func TestSvcActionNoViewKey(t *testing.T) {
 	}
 }
 
-// TestSvcRegValidation: alias/unit patterns and duplicate rejection.
+// TestSvcRegValidation: alias/unit/conf patterns and duplicate rejection.
 func TestSvcRegValidation(t *testing.T) {
 	dir := t.TempDir()
-	bad := []struct{ alias, unit string }{
-		{"UPPER", "x.service"},        // alias not lowercase
-		{"has space", "x.service"},    // alias space
-		{"ok", "x"},                   // unit missing .service
-		{"ok", "x.service; rm -rf /"}, // unit injection attempt
+	bad := []struct{ alias, unit, conf string }{
+		{"UPPER", "x.service", ""},        // alias not lowercase
+		{"has space", "x.service", ""},    // alias space
+		{"ok", "x", ""},                   // unit missing .service
+		{"ok", "x.service; rm -rf /", ""}, // unit injection attempt
+		{"ok", "x.service", "etc/x.json"}, // conf path not absolute
 	}
 	for _, c := range bad {
-		if err := AddSvc(dir, c.alias, c.unit); err == nil {
-			t.Errorf("AddSvc(%q,%q) accepted, want reject", c.alias, c.unit)
+		if err := AddSvc(dir, c.alias, c.unit, c.conf); err == nil {
+			t.Errorf("AddSvc(%q,%q,%q) accepted, want reject", c.alias, c.unit, c.conf)
 		}
 	}
-	if err := AddSvc(dir, "ok", "xray.service"); err != nil {
+	if err := AddSvc(dir, "ok", "xray.service", "/etc/xray/config.json"); err != nil {
 		t.Fatalf("valid AddSvc: %v", err)
 	}
-	if err := AddSvc(dir, "ok", "other.service"); err == nil {
+	if err := AddSvc(dir, "ok", "other.service", ""); err == nil {
 		t.Error("duplicate alias accepted")
 	}
-	if err := AddSvc(dir, "ok2", "xray.service"); err == nil {
+	if err := AddSvc(dir, "ok2", "xray.service", ""); err == nil {
 		t.Error("duplicate unit accepted")
+	}
+	// The conf path round-trips through the registry.
+	reg, err := LoadSvcReg(dir)
+	if err != nil || len(reg) != 1 || reg[0].Conf != "/etc/xray/config.json" {
+		t.Fatalf("conf path not persisted: %+v err=%v", reg, err)
 	}
 }
 
@@ -184,7 +190,7 @@ func TestSvcRegValidation(t *testing.T) {
 // nodes (no key → the whole feature stays dark to the hub).
 func TestSvcStatusRequiresViewKey(t *testing.T) {
 	dir := t.TempDir()
-	AddSvc(dir, "ssrust", "shadowsocks-rust.service")
+	AddSvc(dir, "ssrust", "shadowsocks-rust.service", "")
 	a := &Agent{ID: &Identity{Dir: dir}, Log: slog.New(slog.DiscardHandler), Svc: newFakeSvc()}
 	if got := a.collectSvcStatus(); got != nil {
 		// collectSvcStatus itself doesn't gate on the key, but sealToolConf

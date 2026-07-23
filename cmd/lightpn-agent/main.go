@@ -50,13 +50,16 @@ func main() {
 }
 
 // svcAdd registers a systemd unit under an operator-chosen alias for hub
-// remote control. Registration is local-CLI-only by design: the hub can
-// never add, rename, or remove entries, and only aliases go on the wire.
+// remote control, with an optional config-file path the panel's conf_get
+// view will read. Registration is local-CLI-only by design: the hub can
+// never add, rename, or remove entries, and only aliases go on the wire —
+// the conf path in particular never comes from the hub.
 func svcAdd(args []string) {
 	fs := flag.NewFlagSet("svc-add", flag.ExitOnError)
 	dataDir := fs.String("data-dir", agent.DefaultDataDir(), "identity directory")
 	unit := fs.String("unit", "", "systemd unit 名(如 xray.service)")
 	alias := fs.String("alias", "", "别名(面板与协议中代表该服务,1-32 位小写字母/数字/-)")
+	conf := fs.String("conf", "", "该软件配置文件的绝对路径(可选,面板「拉取配置」会显示)")
 	fs.Parse(args)
 
 	svc := agent.NewSvcManager()
@@ -86,13 +89,28 @@ func svcAdd(args []string) {
 		line, _ := reader.ReadString('\n')
 		*alias = strings.TrimSpace(line)
 	}
+	confAsked := *conf != ""
+	if !confAsked {
+		fmt.Print("配置文件绝对路径(可选,面板「拉取配置」会显示该文件,如 /etc/caddy/Caddyfile;回车跳过): ")
+		line, _ := reader.ReadString('\n')
+		*conf = strings.TrimSpace(line)
+	}
 	if !svc.Exists(*unit) {
 		fatal("systemd 不认识 unit %q(systemctl show 查不到);未登记", *unit)
 	}
-	if err := agent.AddSvc(*dataDir, *alias, *unit); err != nil {
+	if err := agent.AddSvc(*dataDir, *alias, *unit, *conf); err != nil {
 		fatal("%v", err)
 	}
-	fmt.Printf("已登记 %s → %s。\n", *alias, *unit)
+	if *conf == "" {
+		fmt.Printf("已登记 %s → %s。\n", *alias, *unit)
+	} else {
+		fmt.Printf("已登记 %s → %s(配置: %s)。\n", *alias, *unit, *conf)
+		if fi, err := os.Stat(*conf); err != nil {
+			fmt.Printf("提醒:该路径当前无法读取(%v),面板会显示读取错误;确认路径无误或稍后建好文件即可。\n", err)
+		} else if fi.IsDir() {
+			fmt.Println("提醒:该路径是目录,目前只支持单个文件,面板会显示错误。")
+		}
+	}
 	if !agent.HasViewKey(*dataDir) {
 		fmt.Println("注意:本机尚未设置配置查看密码(set-view-pass),远程开关不会激活 —— 无密码则指令无法验真。")
 	}
@@ -127,7 +145,11 @@ func svcList(args []string) {
 	svc := agent.NewSvcManager()
 	for _, e := range reg {
 		active, enabled := svc.Status(e.Unit)
-		fmt.Printf("%-20s %-30s %s/%s\n", e.Alias, e.Unit, active, enabled)
+		conf := e.Conf
+		if conf == "" {
+			conf = "-"
+		}
+		fmt.Printf("%-20s %-30s %-10s %s\n", e.Alias, e.Unit, active+"/"+enabled, conf)
 	}
 }
 

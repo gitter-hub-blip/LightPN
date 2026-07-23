@@ -243,12 +243,14 @@ do_enroll() {
   systemctl enable --now "$SERVICE" && ok "已启动。" || err "启动失败"
 }
 
-# 远程开关服务:登记本机 systemd unit 与别名。协议里只走别名,hub 永远
-# 拿不到 unit 名,也没有任何途径增删登记 —— 一切以本机 services.json 为准。
+# 远程开关服务:登记本机 systemd unit + 别名 + 可选配置文件路径。协议里
+# 只走别名,hub 永远拿不到 unit 名和路径,也没有任何途径增删登记 —— 一切
+# 以本机 services.json 为准。登记了配置路径的软件,面板「拉取配置」会一并
+# 显示该文件(内置自动检测覆盖不到的软件靠这个变相兼容,如 naive/caddy)。
 do_svc() {
   installed || { err "尚未安装,请先执行「安装」。"; return 1; }
   enrolled  || { err "尚未入网,身份目录为空。"; return 1; }
-  echo "当前登记的可远程开关服务:"
+  echo "当前登记的服务(别名 / unit / 状态 / 配置路径):"
   "$BIN_DST" svc-list --data-dir "$DATA_DIR"
   echo
   local ans
@@ -345,7 +347,7 @@ while true; do
   echo -e "  ${blue}8.${plain} 实时跟踪日志(Ctrl+C 返回菜单)"
   echo -e "  ${blue}9.${plain} 完全卸载"
   echo -e "  ${blue}10.${plain} 配置查看密码(设置/重设/清除)"
-  echo -e "  ${blue}11.${plain} 远程开关服务(查看/登记/删除,需已设查看密码)"
+  echo -e "  ${blue}11.${plain} 远程开关/配置查看服务(登记 unit+配置路径+别名)"
   echo -e "  ${blue}0.${plain} 退出"
   echo "----------------------------------------"
   read -rp "请输入编号: " choice
