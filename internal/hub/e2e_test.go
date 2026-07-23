@@ -65,9 +65,10 @@ type fakeAgent struct {
 
 	conn net.Conn
 
-	mu     sync.Mutex
-	pushes []*proto.Envelope // peer_add/update/remove/kick received
-	closed bool
+	mu         sync.Mutex
+	pushes     []*proto.Envelope // peer_add/update/remove/kick received
+	closed     bool
+	lastSealed proto.SvcActionData // last svc_action envelope relayed by the hub
 }
 
 func enrollAgent(t *testing.T, h *Hub, hostname string) *fakeAgent {
@@ -178,6 +179,19 @@ func (f *fakeAgent) readLoop(conn net.Conn) {
 				Files: []proto.ConfFile{
 					{Tool: "xray", Path: "/usr/local/etc/xray/config.json", Content: `{"id":"uuid-here"}`},
 				},
+			})
+			proto.WriteFrame(conn, res)
+		case proto.TypeSvcAction:
+			// The hub must relay the sealed envelope verbatim; echo back a
+			// result so the round-trip/waiter path can be asserted.
+			var d proto.SvcActionData
+			json.Unmarshal(env.Data, &d)
+			f.mu.Lock()
+			f.lastSealed = d
+			f.mu.Unlock()
+			res, _ := proto.NewEnvelope(proto.TypeSvcResult, env.ID, proto.SvcResultData{
+				OK:       true,
+				Services: []proto.SvcStatus{{Alias: "ssrust", Active: "active", Enabled: "enabled"}},
 			})
 			proto.WriteFrame(conn, res)
 		}
@@ -546,6 +560,107 @@ func TestToolConfRequest(t *testing.T) {
 	h.mu.Unlock()
 	if left != 0 {
 		t.Fatalf("confWait not cleaned up: %d left", left)
+	}
+}
+
+// TestSvcActionRelay: the hub relays a browser-sealed command verbatim and
+// returns the agent's svc_result. The hub must not alter the sealed bytes
+// (it has no key), and the waiter must be cleaned up.
+func TestSvcActionRelay(t *testing.T) {
+	h := startHub(t)
+	a := enrollAgent(t, h, "edge-a")
+	a.connect("PUBKEY_A_1", 51820)
+
+	sealed := proto.SvcActionData{Nonce: "bm9uY2Vfb3BhcXVl", CT: "Y2lwaGVydGV4dF9vcGFxdWU"}
+	data, err := h.RequestSvcAction(a.nodeID, sealed, 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res proto.SvcResultData
+	if err := json.Unmarshal(data, &res); err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || len(res.Services) != 1 || res.Services[0].Alias != "ssrust" {
+		t.Fatalf("bad svc result: %+v", res)
+	}
+	// The agent must have received exactly the bytes the hub was handed.
+	a.mu.Lock()
+	got := a.lastSealed
+	a.mu.Unlock()
+	if got.Nonce != sealed.Nonce || got.CT != sealed.CT {
+		t.Fatalf("hub altered sealed command: sent %+v got %+v", sealed, got)
+	}
+
+	h.mu.Lock()
+	left := len(h.confWait)
+	h.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("waiter not cleaned up: %d left", left)
+	}
+
+	// Offline node fails fast.
+	b := enrollAgent(t, h, "edge-b")
+	if _, err := h.RequestSvcAction(b.nodeID, sealed, time.Second); err == nil {
+		t.Fatal("offline node must error")
+	}
+}
+
+// TestSvcNamesStore: display-name overrides round-trip and clear on empty;
+// deleting a node purges them.
+func TestSvcNamesStore(t *testing.T) {
+	h := startHub(t)
+	a := enrollAgent(t, h, "edge-a")
+
+	if err := h.Store.SetSvcName(a.nodeID, "ssrust", "shadowsocks 开关"); err != nil {
+		t.Fatal(err)
+	}
+	names, _ := h.Store.SvcNames(a.nodeID)
+	if names["ssrust"] != "shadowsocks 开关" {
+		t.Fatalf("display name not stored: %+v", names)
+	}
+	// Empty display clears the override.
+	h.Store.SetSvcName(a.nodeID, "ssrust", "")
+	names, _ = h.Store.SvcNames(a.nodeID)
+	if _, ok := names["ssrust"]; ok {
+		t.Fatal("empty display did not clear override")
+	}
+	// Delete node purges any remaining names.
+	h.Store.SetSvcName(a.nodeID, "ssrust", "x")
+	if err := h.DeleteNode(a.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	names, _ = h.Store.SvcNames(a.nodeID)
+	if len(names) != 0 {
+		t.Fatalf("svc names survived node delete: %+v", names)
+	}
+}
+
+// TestPruneSvcNames: prune removes display names whose alias is no longer
+// live, keeps the rest, and reports the count.
+func TestPruneSvcNames(t *testing.T) {
+	h := startHub(t)
+	a := enrollAgent(t, h, "edge-a")
+	h.Store.SetSvcName(a.nodeID, "ssrust", "shadowsocks 开关")
+	h.Store.SetSvcName(a.nodeID, "gone", "已删除的服务")
+
+	// Only ssrust is still registered on the agent.
+	n, err := h.Store.PruneSvcNames(a.nodeID, []string{"ssrust"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("removed %d, want 1", n)
+	}
+	names, _ := h.Store.SvcNames(a.nodeID)
+	if names["ssrust"] != "shadowsocks 开关" {
+		t.Fatal("pruned a live alias")
+	}
+	if _, ok := names["gone"]; ok {
+		t.Fatal("orphan survived prune")
+	}
+	// Idempotent: nothing left to remove.
+	if n, _ := h.Store.PruneSvcNames(a.nodeID, []string{"ssrust"}); n != 0 {
+		t.Fatalf("second prune removed %d, want 0", n)
 	}
 }
 

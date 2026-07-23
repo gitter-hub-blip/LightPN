@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS ip_cooldown (
   overlay_ip  TEXT PRIMARY KEY,
   freed_at    INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS svc_names (
+  node_id  TEXT NOT NULL,
+  alias    TEXT NOT NULL,   -- the agent-side alias; the unit name never reaches the hub
+  display  TEXT NOT NULL,   -- panel display label, purely cosmetic
+  PRIMARY KEY (node_id, alias)
+);
 `
 
 // OpenStore opens (and migrates) the SQLite database at path.
@@ -209,10 +215,70 @@ func (s *Store) DeleteNode(id string, now int64) (*Node, []*Link, error) {
 	if _, err := tx.Exec(`INSERT OR REPLACE INTO ip_cooldown (overlay_ip,freed_at) VALUES (?,?)`, node.OverlayIP, now); err != nil {
 		return nil, nil, err
 	}
+	if _, err := tx.Exec(`DELETE FROM svc_names WHERE node_id=?`, id); err != nil {
+		return nil, nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
 	return node, links, nil
+}
+
+// ---- service display names ----
+
+// SvcNames returns the panel display-name overrides for a node's service
+// aliases. Purely cosmetic hub-side state; absent aliases show as-is.
+func (s *Store) SvcNames(nodeID string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT alias, display FROM svc_names WHERE node_id=?`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var alias, display string
+		if err := rows.Scan(&alias, &display); err != nil {
+			return nil, err
+		}
+		out[alias] = display
+	}
+	return out, rows.Err()
+}
+
+// SetSvcName sets or clears (empty display) one alias's display name.
+func (s *Store) SetSvcName(nodeID, alias, display string) error {
+	if display == "" {
+		_, err := s.db.Exec(`DELETE FROM svc_names WHERE node_id=? AND alias=?`, nodeID, alias)
+		return err
+	}
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO svc_names (node_id,alias,display) VALUES (?,?,?)`,
+		nodeID, alias, display)
+	return err
+}
+
+// PruneSvcNames deletes display-name overrides whose alias is not in keep
+// (the node's current live alias set). Returns how many were removed. Used
+// by the panel to clean up orphans left when an operator deletes an alias on
+// the agent — the hub never learns of that deletion, so cleanup is explicit.
+func (s *Store) PruneSvcNames(nodeID string, keep []string) (int, error) {
+	live := make(map[string]bool, len(keep))
+	for _, a := range keep {
+		live[a] = true
+	}
+	names, err := s.SvcNames(nodeID)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for alias := range names {
+		if !live[alias] {
+			if _, err := s.db.Exec(`DELETE FROM svc_names WHERE node_id=? AND alias=?`, nodeID, alias); err != nil {
+				return removed, err
+			}
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // RevokedSerials returns all revoked certificate serials (for the in-memory

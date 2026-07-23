@@ -231,6 +231,24 @@ do_enroll() {
   systemctl enable --now "$SERVICE" && ok "已启动。" || err "启动失败"
 }
 
+# 远程开关服务:登记本机 systemd unit 与别名。协议里只走别名,hub 永远
+# 拿不到 unit 名,也没有任何途径增删登记 —— 一切以本机 services.json 为准。
+do_svc() {
+  installed || { err "尚未安装,请先执行「安装」。"; return 1; }
+  enrolled  || { err "尚未入网,身份目录为空。"; return 1; }
+  echo "当前登记:"
+  "$BIN_DST" svc-list --data-dir "$DATA_DIR"
+  echo
+  local ans
+  read -rp "登记(a)/删除(d)/取消(回车): " ans
+  case "$ans" in
+    a|A) "$BIN_DST" svc-add --data-dir "$DATA_DIR" ;;
+    d|D) local alias
+         read -rp "要删除的别名: " alias
+         [ -n "$alias" ] && "$BIN_DST" svc-del --data-dir "$DATA_DIR" --alias "$alias" ;;
+  esac
+}
+
 do_view_pass() {
   installed || { err "尚未安装,请先执行「安装」。"; return 1; }
   enrolled  || { err "尚未入网,身份目录为空。"; return 1; }
@@ -314,6 +332,7 @@ while true; do
   echo -e "  ${blue}8.${plain} 实时跟踪日志(Ctrl+C 返回菜单)"
   echo -e "  ${blue}9.${plain} 完全卸载"
   echo -e "  ${blue}10.${plain} 配置查看密码(设置/重设/清除)"
+  echo -e "  ${blue}11.${plain} 远程开关服务(登记/删除,需已设查看密码)"
   echo -e "  ${blue}0.${plain} 退出"
   echo "----------------------------------------"
   read -rp "请输入编号: " choice
@@ -322,6 +341,7 @@ while true; do
     1) do_install; pause ;;
     2) do_enroll; pause ;;
     10) do_view_pass; pause ;;
+    11) do_svc; pause ;;
     3) systemctl start "$SERVICE" && ok "已启动" || err "启动失败"; pause ;;
     4) systemctl stop "$SERVICE" && ok "已停止" || err "停止失败"; pause ;;
     5) systemctl restart "$SERVICE" && ok "已重启" || err "重启失败"; pause ;;

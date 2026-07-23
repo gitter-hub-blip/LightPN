@@ -405,5 +405,6 @@ CREATE TABLE ip_cooldown (
 | `ack` | A→H | 对推送的统一回执 |
 | `kick` | H→A | 清 peer、毁身份、退出 |
 | `rotate_wg` / `rotate_cert` | H→A | 密钥/证书轮换 |
-| `conf_get` / `conf_result` | H→A / A→H | 面板触发的工具配置读取:agent 回传 WG 运行时摘要(无私钥)与自动探测到的翻墙软件配置文件(路径白名单内嵌于 agent,不接受下发路径)。agent 设有查看密码(`view.key`)时,payload 为「打码预览(敏感值→••,与面板 MASK_RE 同步的 maskRE 识别)+ `enc` 信封(Argon2id 派生密钥对 gzip(完整明文 JSON) 做 AES-256-GCM)」:面板先渲染预览,点击打码位才在浏览器解密;hub 只透传,看得到结构、看不到敏感值 |
+| `conf_get` / `conf_result` | H→A / A→H | 面板触发的工具配置读取:agent 回传 WG 运行时摘要(无私钥)与自动探测到的翻墙软件配置文件(路径白名单内嵌于 agent,不接受下发路径)。agent 设有查看密码(`view.key`)时,payload 为「打码预览(敏感值→••,与面板 MASK_RE 同步的 maskRE 识别)+ `enc` 信封(Argon2id 派生密钥对 gzip(完整明文 JSON) 做 AES-256-GCM)」:面板先渲染预览,点击打码位才在浏览器解密;hub 只透传,看得到结构、看不到敏感值。conf_result 另携 `services`(仅设查看密码的节点):operator 登记的可远程开关服务,只含别名与状态,unit 名不上线 |
+| `svc_action` / `svc_result` | H→A / A→H | 面板触发的服务开关。指令由 operator 浏览器用查看密码派生的 key 加密 `{action∈{start,stop,restart}, alias, ts}`(AES-256-GCM);hub 只转发密文,**无法伪造/篡改/重放**(agent 侧 GCM 验真 + ±5 分钟时间窗 + IV 去重)。agent 解密验真后经本地 `services.json` 把别名翻译成 unit,`systemctl <action> <unit>`(固定 argv,不经 shell)。别名→unit 映射只由本地 CLI(svc-add/svc-del)维护,hub 无任何写入途径 |
 | `error` | 双向 | 统一错误,含错误码 |

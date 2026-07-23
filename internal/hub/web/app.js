@@ -14,6 +14,7 @@ const state = {
   toolconf: null,   // { id, data, loading, err } — survives heartbeat re-renders
   confShown: new Set(), // indices of currently revealed masked values
   confKeys: new Map(),  // nodeId -> CryptoKey,查看密码派生密钥的会话内缓存
+  svcNames: {},         // alias -> 显示名(hub 侧覆盖,纯装饰)
   ws: null,
   wsUp: false,
   route: location.hash || "#/nodes",
@@ -613,7 +614,130 @@ async function unsealConf(id, enc) {
   }
 }
 
+// ---- service control (svc_action) ----
+// data.services = [{alias, active, enabled}](仅设了查看密码的节点才有)。
+// 指令由浏览器用查看密码派生的 key 加密后交 hub 转发,hub 全程只见密文。
+// svcNames 是 hub 侧的显示名覆盖(纯装饰),按 alias 索引。
+
+function svcStatePill(active) {
+  const on = active === "active";
+  const cls = on ? "online" : (active === "failed" ? "offline" : "");
+  return `<span class="pill ${cls}">${esc(active || "unknown")}</span>`;
+}
+
+function renderSvcCard(d) {
+  const svcs = d.services;
+  if (!svcs || !svcs.length) return "";
+  const names = state.svcNames || {};
+  // 孤儿显示名:hub 上还留着、但 agent 当前别名集合里已没有的。agent 端
+  // 删别名后 hub 不会被通知,这些残留只能显式清理。
+  const live = new Set(svcs.map(s => s.alias));
+  const orphans = Object.keys(names).filter(a => !live.has(a));
+  let html = `<div class="confhead" style="margin-top:16px"><span class="pill online">远程开关</span>
+    <span class="hint">指令在浏览器用查看密码加密,hub 只转发密文</span></div>`;
+  if (orphans.length) {
+    html += `<div class="hint" style="color:#c60;margin-bottom:8px">
+      检测到 ${orphans.length} 个失效显示名(对应别名已在节点上删除):${esc(orphans.join("、"))}
+      <a href="#" id="svc-prune"> 清理</a></div>`;
+  }
+  for (const s of svcs) {
+    const label = names[s.alias] || s.alias;
+    html += `<div class="card" style="margin-bottom:8px">
+      <div class="kv">
+        <span class="k">${esc(label)} ${svcStatePill(s.active)}
+          <a href="#" class="hint svc-rename" data-alias="${esc(s.alias)}">重命名</a></span>
+        <span class="v">
+          <button class="svc-act" data-alias="${esc(s.alias)}" data-action="start">启动</button>
+          <button class="svc-act" data-alias="${esc(s.alias)}" data-action="restart">重启</button>
+          <button class="svc-act danger" data-alias="${esc(s.alias)}" data-action="stop">停止</button>
+        </span>
+      </div>
+    </div>`;
+  }
+  return html;
+}
+
+// 用会话内缓存的 view key 加密 {action, alias, ts};无缓存则弹密码框
+// 派生(和解锁配置同一把 key,派生后缓存)。需要 data.enc 提供 KDF 参数。
+async function sealSvcCmd(id, enc, action, alias) {
+  let key = state.confKeys.get(id);
+  if (!key) {
+    if (typeof hashwasm === "undefined") throw new Error("argon2 模块未加载,请刷新页面");
+    let hint = "";
+    for (;;) {
+      const pw = await passwordModal(hint);
+      if (pw === null) throw new Error("已取消");
+      if (!pw) { hint = "密码不能为空。"; continue; }
+      key = await deriveConfKey(pw, enc);
+      // 用预览里的密文验证密码对不对,避免拿错密码发出去。
+      try { await decryptConf(key, enc); state.confKeys.set(id, key); break; }
+      catch { hint = "密码错误(校验失败),请重试。"; }
+    }
+  }
+  const plain = new TextEncoder().encode(JSON.stringify({
+    action, alias, ts: Math.floor(Date.now() / 1000),
+  }));
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce }, key, plain));
+  const b64e = u => btoa(String.fromCharCode(...u));
+  return { n: b64e(nonce), ct: b64e(ct) };
+}
+
+async function doSvcAction(id, action, alias) {
+  const tc = state.toolconf;
+  if (!tc || !tc.data || !tc.data.enc) { toast("该节点未启用查看密码,无法远程开关"); return; }
+  try {
+    const sealed = await sealSvcCmd(id, tc.data.enc, action, alias);
+    const res = await api("POST", `/api/nodes/${id}/svc`, sealed);
+    if (res.ok) toast(`${action} 已执行`);
+    else toast("执行失败:" + (res.err || "未知"));
+    // 用回执里的最新状态刷新卡片(services 明文,无敏感值)。
+    if (res.services) { tc.data.services = res.services; renderToolConf(); }
+  } catch (e) { toast(e.message); }
+}
+
+function bindSvcCard(id) {
+  const prune = $("#svc-prune");
+  if (prune) prune.onclick = async e => {
+    e.preventDefault();
+    const svcs = (state.toolconf && state.toolconf.data.services) || [];
+    const aliases = svcs.map(s => s.alias);
+    try {
+      const res = await api("POST", `/api/nodes/${id}/svcnames/prune`, { aliases });
+      toast(`已清理 ${res.removed} 个失效显示名`);
+      state.svcNames = await api("GET", `/api/nodes/${id}/svcnames`);
+      renderToolConf();
+    } catch (err) { toast(err.message); }
+  };
+  document.querySelectorAll(".svc-act").forEach(btn => {
+    btn.onclick = () => {
+      const { alias, action } = btn.dataset;
+      if (action === "stop") {
+        confirmModal("停止该服务?如果你当前的面板流量正经此节点出网,停止后会立即断开。", () => doSvcAction(id, "stop", alias));
+      } else {
+        doSvcAction(id, action, alias);
+      }
+    };
+  });
+  document.querySelectorAll(".svc-rename").forEach(el => {
+    el.onclick = async e => {
+      e.preventDefault();
+      const alias = el.dataset.alias;
+      const cur = (state.svcNames || {})[alias] || "";
+      const name = prompt(`为「${alias}」设置面板显示名(留空恢复别名):`, cur);
+      if (name === null) return;
+      try {
+        await api("PATCH", `/api/nodes/${id}/svcnames`, { alias, display: name.trim() });
+        state.svcNames = await api("GET", `/api/nodes/${id}/svcnames`);
+        renderToolConf();
+      } catch (err) { toast(err.message); }
+    };
+  });
+}
+
 async function loadToolConf(id) {
+  try { state.svcNames = await api("GET", `/api/nodes/${id}/svcnames`); }
+  catch { state.svcNames = {}; }
   state.toolconf = { id, loading: true };
   state.confShown.clear();
   renderToolConf();
@@ -635,6 +759,9 @@ async function unlockToolConf(revealIdx) {
   if (!tc || !tc.data || !tc.data.enc) return;
   try {
     const plain = await unsealConf(tc.id, tc.data.enc);
+    // 保留 enc(供服务命令继续加密下发)并标记已解锁(不再显示打码提示)。
+    plain.enc = tc.data.enc;
+    plain.unlocked = true;
     state.toolconf = { id: tc.id, data: plain };
     state.confShown.clear();
     if (revealIdx !== undefined) state.confShown.add(revealIdx);
@@ -655,12 +782,13 @@ function renderToolConf() {
     <div class="kv"><span class="k">本机公钥</span><span class="v">${esc(wg.pubkey || "–")}</span></div>
     <div class="kv"><span class="k">内核 Peer 数</span><span class="v">${(wg.peers || []).length}</span></div>
   </div>`;
-  if (d.enc) {
+  const encrypted = d.enc && !d.unlocked; // 仍处于打码预览态
+  if (encrypted) {
     html += `<div class="hint" style="margin-bottom:10px">🔒 该节点已启用配置查看密码:下方为打码预览,敏感值端到端加密 —— 点击任一 •••••••• 输入密码解密。</div>`;
   }
   const files = d.files || [];
   if (!files.length) {
-    html += d.enc
+    html += encrypted
       ? `<div class="empty"><a href="#" id="conf-unlock">配置已加密,点击输入查看密码解锁</a></div>`
       : `<div class="empty">未在常见路径检测到翻墙软件配置(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks-rust / mihomo / clash)。</div>`;
   }
@@ -672,14 +800,16 @@ function renderToolConf() {
       ? `<div class="empty">读取失败:${esc(f.err)}</div>`
       : `<pre class="confbox">${maskRender(f.content || "")}</pre>`;
   }
+  html += renderSvcCard(d);
   out.innerHTML = html;
+  bindSvcCard(tc.id);
   const unlock = $("#conf-unlock", out);
   if (unlock) unlock.onclick = e => { e.preventDefault(); unlockToolConf(); };
   out.querySelectorAll(".mask").forEach(el => {
     el.onclick = () => {
       const i = Number(el.dataset.i);
       // 仍处于加密预览:点击打码位即触发密码解锁,而非本地显示。
-      if (tc.data && tc.data.enc) { unlockToolConf(i); return; }
+      if (tc.data && tc.data.enc && !tc.data.unlocked) { unlockToolConf(i); return; }
       if (state.confShown.has(i)) { state.confShown.delete(i); el.classList.remove("shown"); el.textContent = "••••••••"; }
       else { state.confShown.add(i); el.classList.add("shown"); el.textContent = el.dataset.v; }
     };

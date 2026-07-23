@@ -75,6 +75,12 @@ func SetViewPassword(dir, password string) error {
 	return os.WriteFile(viewKeyPath(dir), data, 0o600)
 }
 
+// HasViewKey reports whether a view password is configured (CLI hints).
+func HasViewKey(dir string) bool {
+	_, err := os.Stat(viewKeyPath(dir))
+	return err == nil
+}
+
 // ClearViewPassword removes the view key; conf_get replies revert to plain.
 func ClearViewPassword(dir string) error {
 	err := os.Remove(viewKeyPath(dir))
@@ -193,11 +199,16 @@ func (a *Agent) sealToolConf(res proto.ConfResultData) proto.ConfResultData {
 	if vk == nil {
 		return res // no password configured — plain, as before
 	}
+	// Registered services ride along on view-password nodes only. They go
+	// into BOTH the sealed payload and the preview: the panel swaps in the
+	// decrypted payload wholesale after unlock, so anything missing from it
+	// would vanish from the page at that moment.
+	res.Services = a.collectSvcStatus()
 	plain, err := json.Marshal(res)
 	if err == nil {
 		var enc *proto.ConfEnc
 		if enc, err = vk.seal(plain); err == nil {
-			preview := proto.ConfResultData{WG: res.WG, Enc: enc}
+			preview := proto.ConfResultData{WG: res.WG, Services: res.Services, Enc: enc}
 			preview.Files = make([]proto.ConfFile, len(res.Files))
 			for i, f := range res.Files {
 				f.Content = maskSecrets(f.Content)

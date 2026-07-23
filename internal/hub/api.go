@@ -19,6 +19,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/argon2"
+
+	"github.com/gitter-hub-blip/lightpn/internal/proto"
 )
 
 //go:embed web
@@ -116,6 +118,10 @@ func (h *Hub) ServeAPI(stop <-chan struct{}) error {
 	mux.Handle("DELETE /api/nodes/{id}", a.auth(a.deleteNode))
 	mux.Handle("POST /api/nodes/{id}/rotate-wg", a.auth(a.rotateWG))
 	mux.Handle("GET /api/nodes/{id}/toolconf", a.auth(a.nodeToolConf))
+	mux.Handle("POST /api/nodes/{id}/svc", a.auth(a.nodeSvcAction))
+	mux.Handle("GET /api/nodes/{id}/svcnames", a.auth(a.getSvcNames))
+	mux.Handle("PATCH /api/nodes/{id}/svcnames", a.auth(a.setSvcName))
+	mux.Handle("POST /api/nodes/{id}/svcnames/prune", a.auth(a.pruneSvcNames))
 	mux.Handle("POST /api/tokens", a.auth(a.createToken))
 	mux.Handle("GET /api/tokens", a.auth(a.listTokens))
 	mux.Handle("DELETE /api/tokens/{id}", a.auth(a.deleteToken))
@@ -378,6 +384,83 @@ func (a *apiServer) nodeToolConf(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(data)
+}
+
+// nodeSvcAction relays a browser-sealed service command (svc_action). The
+// body is the sealed envelope as produced in the operator's browser; the
+// hub cannot inspect or forge it, only pass it along.
+func (a *apiServer) nodeSvcAction(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := a.hub.Store.GetNode(id); err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	var d proto.SvcActionData
+	if err := json.NewDecoder(r.Body).Decode(&d); err != nil || d.Nonce == "" || d.CT == "" {
+		httpErr(w, http.StatusBadRequest, "bad sealed command")
+		return
+	}
+	data, err := a.hub.RequestSvcAction(id, d, 40*time.Second) // systemctl may block up to 30s agent-side
+	if err != nil {
+		if errors.Is(err, ErrConfTimeout) {
+			httpErr(w, http.StatusGatewayTimeout, err.Error())
+			return
+		}
+		httpErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+// getSvcNames / setSvcName manage the cosmetic display-name overrides for a
+// node's service aliases.
+func (a *apiServer) getSvcNames(w http.ResponseWriter, r *http.Request) {
+	names, err := a.hub.Store.SvcNames(r.PathValue("id"))
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, names)
+}
+
+func (a *apiServer) setSvcName(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Alias   string `json:"alias"`
+		Display string `json:"display"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Alias == "" {
+		httpErr(w, http.StatusBadRequest, "alias required")
+		return
+	}
+	if len(body.Display) > 64 {
+		httpErr(w, http.StatusBadRequest, "display name too long")
+		return
+	}
+	if err := a.hub.Store.SetSvcName(r.PathValue("id"), body.Alias, strings.TrimSpace(body.Display)); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// pruneSvcNames removes display-name overrides for aliases no longer present
+// on the agent. The body carries the current live alias set as the panel
+// last saw it, so the hub deletes exactly the orphans.
+func (a *apiServer) pruneSvcNames(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Aliases []string `json:"aliases"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	n, err := a.hub.Store.PruneSvcNames(r.PathValue("id"), body.Aliases)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]int{"removed": n})
 }
 
 func (a *apiServer) rotateWG(w http.ResponseWriter, r *http.Request) {

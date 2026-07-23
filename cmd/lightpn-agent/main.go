@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,9 +35,100 @@ func main() {
 		case "clear-view-pass":
 			clearViewPass(os.Args[2:])
 			return
+		case "svc-add":
+			svcAdd(os.Args[2:])
+			return
+		case "svc-del":
+			svcDel(os.Args[2:])
+			return
+		case "svc-list":
+			svcList(os.Args[2:])
+			return
 		}
 	}
 	run(os.Args[1:])
+}
+
+// svcAdd registers a systemd unit under an operator-chosen alias for hub
+// remote control. Registration is local-CLI-only by design: the hub can
+// never add, rename, or remove entries, and only aliases go on the wire.
+func svcAdd(args []string) {
+	fs := flag.NewFlagSet("svc-add", flag.ExitOnError)
+	dataDir := fs.String("data-dir", agent.DefaultDataDir(), "identity directory")
+	unit := fs.String("unit", "", "systemd unit 名(如 xray.service)")
+	alias := fs.String("alias", "", "别名(面板与协议中代表该服务,1-32 位小写字母/数字/-)")
+	fs.Parse(args)
+
+	svc := agent.NewSvcManager()
+	reader := bufio.NewReader(os.Stdin)
+	if *unit == "" {
+		if found := agent.DetectSvcCandidates(svc); len(found) > 0 {
+			fmt.Println("检测到的常见翻墙软件 unit(仅供参考,可输入其他):")
+			for i, u := range found {
+				fmt.Printf("  %d) %s\n", i+1, u)
+			}
+			fmt.Print("输入编号或完整 unit 名: ")
+			line, _ := reader.ReadString('\n')
+			line = strings.TrimSpace(line)
+			if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(found) {
+				*unit = found[n-1]
+			} else {
+				*unit = line
+			}
+		} else {
+			fmt.Print("systemd unit 名(如 xray.service): ")
+			line, _ := reader.ReadString('\n')
+			*unit = strings.TrimSpace(line)
+		}
+	}
+	if *alias == "" {
+		fmt.Print("别名(如 ssrust): ")
+		line, _ := reader.ReadString('\n')
+		*alias = strings.TrimSpace(line)
+	}
+	if !svc.Exists(*unit) {
+		fatal("systemd 不认识 unit %q(systemctl show 查不到);未登记", *unit)
+	}
+	if err := agent.AddSvc(*dataDir, *alias, *unit); err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("已登记 %s → %s。\n", *alias, *unit)
+	if !agent.HasViewKey(*dataDir) {
+		fmt.Println("注意:本机尚未设置配置查看密码(set-view-pass),远程开关不会激活 —— 无密码则指令无法验真。")
+	}
+}
+
+func svcDel(args []string) {
+	fs := flag.NewFlagSet("svc-del", flag.ExitOnError)
+	dataDir := fs.String("data-dir", agent.DefaultDataDir(), "identity directory")
+	alias := fs.String("alias", "", "要删除的别名")
+	fs.Parse(args)
+	if *alias == "" {
+		fatal("usage: lightpn-agent svc-del --alias <name>")
+	}
+	if err := agent.DelSvc(*dataDir, *alias); err != nil {
+		fatal("%v", err)
+	}
+	fmt.Printf("已删除别名 %s。\n", *alias)
+}
+
+func svcList(args []string) {
+	fs := flag.NewFlagSet("svc-list", flag.ExitOnError)
+	dataDir := fs.String("data-dir", agent.DefaultDataDir(), "identity directory")
+	fs.Parse(args)
+	reg, err := agent.LoadSvcReg(*dataDir)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if len(reg) == 0 {
+		fmt.Println("尚未登记任何服务。用 svc-add 登记。")
+		return
+	}
+	svc := agent.NewSvcManager()
+	for _, e := range reg {
+		active, enabled := svc.Status(e.Unit)
+		fmt.Printf("%-20s %-30s %s/%s\n", e.Alias, e.Unit, active, enabled)
+	}
 }
 
 // setViewPass configures the conf-view password: panel conf_get replies are
@@ -126,6 +218,7 @@ func run(args []string) {
 		Log:             log,
 		WGPort:          *wgPort,
 		HeartbeatPeriod: time.Duration(*heartbeat) * time.Second,
+		Svc:             agent.NewSvcManager(),
 	}
 
 	// Exit SOCKS5: enable it if a port is set, a bind is overridden, or a

@@ -43,6 +43,15 @@ type Agent struct {
 	SocksListen string
 	SocksPort   int
 
+	// Svc drives operator-registered systemd services (svc_action). nil
+	// disables the feature entirely.
+	Svc SvcManager
+
+	// svcSeen is the sealed-command replay cache (GCM IVs already accepted
+	// within the freshness window). Guarded by svcMu.
+	svcMu   sync.Mutex
+	svcSeen map[string]int64
+
 	connMu sync.Mutex
 	conn   net.Conn
 
@@ -313,6 +322,20 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 			return err
 		}
 		a.Log.Info("tool conf requested by hub")
+		return a.write(conn, res)
+
+	case proto.TypeSvcAction:
+		// Browser-sealed service command (§6.2): the hub cannot forge one —
+		// openSvcCmd authenticates against the local view key before any
+		// alias lookup or systemctl call.
+		var d proto.SvcActionData
+		if err := json.Unmarshal(env.Data, &d); err != nil {
+			return a.ack(conn, env.ID, err)
+		}
+		res, err := proto.NewEnvelope(proto.TypeSvcResult, env.ID, a.handleSvcAction(d, time.Now().Unix()))
+		if err != nil {
+			return err
+		}
 		return a.write(conn, res)
 
 	case proto.TypeKick:

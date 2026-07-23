@@ -31,6 +31,8 @@ const (
 	TypeRotateCert  = "rotate_cert"
 	TypeConfGet     = "conf_get"
 	TypeConfResult  = "conf_result"
+	TypeSvcAction   = "svc_action"
+	TypeSvcResult   = "svc_result"
 	TypeError       = "error"
 )
 
@@ -239,13 +241,43 @@ type ConfEnc struct {
 	CT string `json:"ct"`
 }
 
+// SvcStatus is one operator-registered service on an agent, identified only
+// by its local alias: the systemd unit name never goes on the wire (the
+// alias→unit map lives solely in the agent's services.json).
+type SvcStatus struct {
+	Alias   string `json:"alias"`
+	Active  string `json:"active"`  // systemd ActiveState: active/inactive/failed/...
+	Enabled string `json:"enabled"` // systemd UnitFileState: enabled/disabled/...
+}
+
 // ConfResultData answers a conf_get: WG runtime state plus every proxy-tool
 // config file auto-detected on the node. When Enc is set the agent has a
-// view password: WG/Files are zero and the real payload is inside Enc.
+// view password: Files carry a masked preview, the full payload is inside
+// Enc, and Services lists the remotely controllable units (view-password
+// nodes only — without a view key no command can be authenticated, so the
+// service feature stays dark).
 type ConfResultData struct {
-	WG    ConfWG     `json:"wg"`
-	Files []ConfFile `json:"files"`
-	Enc   *ConfEnc   `json:"enc,omitempty"`
+	WG       ConfWG      `json:"wg"`
+	Files    []ConfFile  `json:"files"`
+	Services []SvcStatus `json:"services,omitempty"`
+	Enc      *ConfEnc    `json:"enc,omitempty"`
+}
+
+// SvcActionData carries a service command sealed by the operator's BROWSER
+// with the view-password key — the hub relays it verbatim and cannot forge,
+// alter, or replay one (AES-GCM auth + the agent's freshness window and
+// nonce cache). The inner plaintext is JSON {"action","alias","ts"}.
+type SvcActionData struct {
+	Nonce string `json:"n"`  // base64 std, 12-byte GCM IV; doubles as replay key
+	CT    string `json:"ct"` // base64 std
+}
+
+// SvcResultData reports a command's outcome plus the refreshed service list
+// (aliases and states only — same exposure level as ConfResultData).
+type SvcResultData struct {
+	OK       bool        `json:"ok"`
+	Err      string      `json:"err,omitempty"`
+	Services []SvcStatus `json:"services,omitempty"`
 }
 
 type ErrorData struct {

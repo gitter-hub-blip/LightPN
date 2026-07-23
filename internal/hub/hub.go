@@ -438,10 +438,11 @@ func (h *Hub) RotateWG(id string) error {
 // ErrConfTimeout reports that an agent did not answer conf_get in time.
 var ErrConfTimeout = fmt.Errorf("agent did not answer in time")
 
-// RequestToolConf pushes conf_get to a node and waits for its conf_result
-// (panel-triggered, §6.2). Nothing is cached or persisted: every call is a
-// fresh read from the edge (hub minimal-persistence invariant).
-func (h *Hub) RequestToolConf(id string, timeout time.Duration) (json.RawMessage, error) {
+// requestReply pushes an envelope to a node and waits for the reply frame
+// carrying the same envelope ID (conf_get→conf_result, svc_action→
+// svc_result). Nothing is cached or persisted: every call is a fresh round
+// trip to the edge (hub minimal-persistence invariant).
+func (h *Hub) requestReply(id, typ string, payload any, timeout time.Duration) (json.RawMessage, error) {
 	h.mu.Lock()
 	s := h.sessions[id]
 	if s == nil {
@@ -458,7 +459,7 @@ func (h *Hub) RequestToolConf(id string, timeout time.Duration) (json.RawMessage
 		delete(h.confWait, reqID)
 		h.mu.Unlock()
 	}
-	env, err := proto.NewEnvelope(proto.TypeConfGet, reqID, struct{}{})
+	env, err := proto.NewEnvelope(typ, reqID, payload)
 	if err != nil {
 		cleanup()
 		return nil, err
@@ -474,9 +475,23 @@ func (h *Hub) RequestToolConf(id string, timeout time.Duration) (json.RawMessage
 	}
 }
 
-// handleConfResult delivers an agent's conf_result to the waiting API call.
-// The waiter is keyed by the request's envelope ID and pinned to the node it
-// was sent to, so another session cannot spoof a reply.
+// RequestToolConf pushes conf_get to a node and waits for its conf_result
+// (panel-triggered, §6.2).
+func (h *Hub) RequestToolConf(id string, timeout time.Duration) (json.RawMessage, error) {
+	return h.requestReply(id, proto.TypeConfGet, struct{}{}, timeout)
+}
+
+// RequestSvcAction relays a browser-sealed service command and waits for
+// the agent's svc_result. The hub never sees inside d.CT — it cannot forge,
+// alter, or usefully replay a command (agent-side GCM + nonce cache).
+func (h *Hub) RequestSvcAction(id string, d proto.SvcActionData, timeout time.Duration) (json.RawMessage, error) {
+	return h.requestReply(id, proto.TypeSvcAction, d, timeout)
+}
+
+// handleConfResult delivers an agent's conf_result or svc_result to the
+// waiting API call. The waiter is keyed by the request's envelope ID and
+// pinned to the node it was sent to, so another session cannot spoof a
+// reply.
 func (h *Hub) handleConfResult(s *session, env *proto.Envelope) {
 	h.mu.Lock()
 	w, ok := h.confWait[env.ID]

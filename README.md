@@ -160,6 +160,30 @@ lightpn-agent --data-dir /var/lib/lightpn/identity --socks-port 1080
 - 密码错误表现为解密校验失败并重新提示;忘记密码在机器上重新 `set-view-pass` 即可(密钥材料 `view.key` 只存该 agent 本地,0600)。`clear-view-pass` 恢复明文模式。
 - 每台节点密码独立:即使某个密文被截获并离线爆破成功,也只影响那一台。
 
+### 远程开关翻墙服务(可选,需已设查看密码)
+
+给某台 edge 的 systemd 服务登记一个别名后,面板即可远程 start/stop/restart 它 —— 用来远程重启抽风的 xray、或临时停用某个节点的代理。
+
+登记(在 edge 上,部署脚本菜单「远程开关服务」或直接 CLI):
+
+```
+lightpn-agent svc-add          # 交互式:从探测到的常见 unit 里选,或手输,再起个别名
+lightpn-agent svc-add --unit shadowsocks-rust.service --alias ssrust
+lightpn-agent svc-list
+lightpn-agent svc-del --alias ssrust
+```
+
+安全模型(与查看密码同源,刻意设计成 hub 攻陷也无法滥用):
+
+- **hub 永远拿不到 unit 名**:协议里只走别名。别名→unit 的映射只存在 agent 本地 `services.json`,**只有本机 CLI 能增删**,hub 没有任何写入途径。面板上还能给别名再设一个纯装饰的显示名(如「shadowsocks 开关」),存在 hub 侧,不参与协议。
+- **指令由浏览器加密,不是 hub**:面板用查看密码派生的密钥把 `{动作, 别名, 时间戳}` 做 AES-256-GCM 加密,hub 只转发密文。被攻陷的 hub 既伪造不出合法指令(没有密钥),也改不动指令内容(GCM 校验失败),重放旧指令会被 agent 的时间窗(±5 分钟)和 nonce 去重挡下。
+- **agent 只做白名单动作**:动作只有 start/stop/restart 三种,对象只能是登记过的别名;执行走 `systemctl <action> <unit>` 固定参数、不经 shell,协议里不存在任意命令字段。即使 hub 完全失陷,它能触及的也仅限你在该节点亲手登记、且指令能过本地密钥验真的操作。
+- **没设查看密码的节点,这个功能完全不激活** —— 无密钥则指令无法验真,agent 连"本机有哪些可管理服务"都不会上报。
+
+注意:如果你人在墙内、面板流量本身正经某节点的代理出网,**停止那个服务会当场断开你的连接**,面板对「停止」有二次确认提示。
+
+在 edge 上 `svc-del` 删掉某别名后,hub 不会被通知(它不缓存服务列表,每次拉取都现场读 agent 的当前登记,所以服务卡片会自动消失)。唯一的例外是你之前给该别名设过的**面板显示名**——它留在 hub 侧。下次拉取配置时若检测到这类失效显示名,服务卡片会给出提示与「清理」入口,点一下即可删除。
+
 每次拉取都是现场读取,hub 不缓存、不落盘;节点离线时不可查(HTTP 409),agent 超过 10 秒未响应报超时(HTTP 504)。
 
 > 说明:数据面出口依赖内核 WireGuard,仅 Linux 生效;非 Linux 平台 agent 用内存桩,SOCKS 切换逻辑仍可跑通用于开发。
@@ -173,6 +197,7 @@ lightpn-agent --data-dir /var/lib/lightpn/identity --socks-port 1080
 | agent 重启 | 自动重新注册,对端在一个推送周期内拿到新 WG 公钥,隧道自愈 |
 | 节点删除 | 面板删除即级联:清 link → 对端移除 peer → 踢下线 → 吊销证书 → IP 进 30 天冷却池 |
 | 指标历史 | 内存 ring buffer,24h × 30s 粒度,不落盘;hub 重启后从头累积 |
+| 心跳流量 | 每帧约 300 B(0 peer)+ ~160 B/peer;默认 15s 一次。3~5 peer 的节点应用层约 1.5~2.2 GB/年,计入 TCP/IP 包头后实际出网约 2~3 GB/年 —— 相对任何 VPS 配额可忽略。嫌多可用 `--heartbeat-s 30` 减半(代价:面板实时性变粗) |
 
 ## 卸载
 

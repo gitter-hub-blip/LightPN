@@ -292,7 +292,7 @@ func (h *Hub) runSession(conn *tls.Conn, node *Node) {
 			h.handleHeartbeat(s, env)
 		case proto.TypeAck:
 			h.handleAck(s, env)
-		case proto.TypeConfResult:
+		case proto.TypeConfResult, proto.TypeSvcResult:
 			h.handleConfResult(s, env)
 		default:
 			h.sendError(conn, proto.ErrUnknownType, "unknown message type "+env.Type)
