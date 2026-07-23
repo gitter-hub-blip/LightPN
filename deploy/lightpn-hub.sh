@@ -139,6 +139,45 @@ do_password() {
   "$BIN_DST" admin set-password --data-dir "$DATA_DIR"
 }
 
+# 备份数据目录(SQLite + CA 私钥)与配置。CA 是全网信任根,丢失即全网
+# 重新入网,这是唯一的灾难恢复凭据 —— 打包时会热备(hub 无需停机,SQLite
+# WAL 下 tar 得到的是一致快照的近似;要绝对一致可先停服务再备份)。
+do_backup() {
+  installed || { err "尚未安装,请先执行「安装」。"; return 1; }
+  [ -d "$DATA_DIR" ] || { err "数据目录 $DATA_DIR 不存在,无可备份。"; return 1; }
+  local default_dir dest
+  default_dir="$(default_app_dir)/.."
+  if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    default_dir="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  else
+    default_dir="$HOME"
+  fi
+  read -rp "备份保存目录 (回车用 $default_dir): " dest
+  [ -n "$dest" ] || dest="$default_dir"
+  if [ ! -d "$dest" ]; then
+    mkdir -p "$dest" || { err "无法创建 $dest。"; return 1; }
+  fi
+  local stamp file
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  file="$dest/lightpn-hub-backup-$stamp.tar.gz"
+  # 打包数据目录和配置(都在 APP_DIR 下,用相对路径避免绝对路径泄进包)。
+  echo "==> 打包 $DATA_DIR$([ -f "$CONF" ] && echo " 与 $CONF")"
+  if tar -czf "$file" -C "$APP_DIR" \
+        "$(basename "$DATA_DIR")" \
+        $([ -f "$CONF" ] && basename "$CONF"); then
+    chmod 600 "$file"
+    # 尽量把属主还给发起 sudo 的用户,免得备份文件是 root 属主难管理。
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+      chown "$SUDO_USER" "$file" 2>/dev/null || true
+    fi
+    ok "已备份到 $file"
+    warn "该包含 CA 私钥与全部节点注册信息,权限已设 600 —— 请转移到安全位置妥善保管,勿随意分发。"
+  else
+    err "打包失败。"
+    return 1
+  fi
+}
+
 do_uninstall() {
   installed || warn "未检测到完整安装,仍将尽量清理残留。"
   echo "==> 停止并移除服务"
@@ -187,13 +226,14 @@ while true; do
   echo "----------------------------------------"
   echo -e "  ${blue}1.${plain} 安装 / 升级(可修改公网地址)"
   echo -e "  ${blue}2.${plain} 重设管理员密码"
-  echo -e "  ${blue}3.${plain} 启动"
-  echo -e "  ${blue}4.${plain} 停止"
-  echo -e "  ${blue}5.${plain} 重启"
-  echo -e "  ${blue}6.${plain} 查看运行状态"
-  echo -e "  ${blue}7.${plain} 查看最近日志"
-  echo -e "  ${blue}8.${plain} 实时跟踪日志(Ctrl+C 返回菜单)"
-  echo -e "  ${blue}9.${plain} 完全卸载"
+  echo -e "  ${blue}3.${plain} 备份数据(SQLite + CA + 配置)"
+  echo -e "  ${blue}4.${plain} 启动"
+  echo -e "  ${blue}5.${plain} 停止"
+  echo -e "  ${blue}6.${plain} 重启"
+  echo -e "  ${blue}7.${plain} 查看运行状态"
+  echo -e "  ${blue}8.${plain} 查看最近日志"
+  echo -e "  ${blue}9.${plain} 实时跟踪日志(Ctrl+C 返回菜单)"
+  echo -e "  ${blue}10.${plain} 完全卸载"
   echo -e "  ${blue}0.${plain} 退出"
   echo "----------------------------------------"
   read -rp "请输入编号: " choice
@@ -201,13 +241,14 @@ while true; do
   case "$choice" in
     1) do_install; pause ;;
     2) do_password; pause ;;
-    3) systemctl start "$SERVICE" && ok "已启动" || err "启动失败"; pause ;;
-    4) systemctl stop "$SERVICE" && ok "已停止" || err "停止失败"; pause ;;
-    5) systemctl restart "$SERVICE" && ok "已重启" || err "重启失败"; pause ;;
-    6) systemctl --no-pager status "$SERVICE" || true; pause ;;
-    7) journalctl -u "$SERVICE" -n 100 --no-pager || true; pause ;;
-    8) trap : INT; journalctl -u "$SERVICE" -n 20 -f || true; trap - INT ;;
-    9) do_uninstall; pause ;;
+    3) do_backup; pause ;;
+    4) systemctl start "$SERVICE" && ok "已启动" || err "启动失败"; pause ;;
+    5) systemctl stop "$SERVICE" && ok "已停止" || err "停止失败"; pause ;;
+    6) systemctl restart "$SERVICE" && ok "已重启" || err "重启失败"; pause ;;
+    7) systemctl --no-pager status "$SERVICE" || true; pause ;;
+    8) journalctl -u "$SERVICE" -n 100 --no-pager || true; pause ;;
+    9) trap : INT; journalctl -u "$SERVICE" -n 20 -f || true; trap - INT ;;
+    10) do_uninstall; pause ;;
     0) exit 0 ;;
     *) err "无效编号: $choice" ;;
   esac

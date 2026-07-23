@@ -236,11 +236,12 @@ do_enroll() {
 do_svc() {
   installed || { err "尚未安装,请先执行「安装」。"; return 1; }
   enrolled  || { err "尚未入网,身份目录为空。"; return 1; }
-  echo "当前登记:"
+  echo "当前登记的可远程开关服务:"
   "$BIN_DST" svc-list --data-dir "$DATA_DIR"
   echo
   local ans
-  read -rp "登记(a)/删除(d)/取消(回车): " ans
+  # 回车即只查看退出;上面已经列出当前登记。
+  read -rp "登记(a)/删除(d)/仅查看(回车退出): " ans
   case "$ans" in
     a|A) "$BIN_DST" svc-add --data-dir "$DATA_DIR" ;;
     d|D) local alias
@@ -332,7 +333,7 @@ while true; do
   echo -e "  ${blue}8.${plain} 实时跟踪日志(Ctrl+C 返回菜单)"
   echo -e "  ${blue}9.${plain} 完全卸载"
   echo -e "  ${blue}10.${plain} 配置查看密码(设置/重设/清除)"
-  echo -e "  ${blue}11.${plain} 远程开关服务(登记/删除,需已设查看密码)"
+  echo -e "  ${blue}11.${plain} 远程开关服务(查看/登记/删除,需已设查看密码)"
   echo -e "  ${blue}0.${plain} 退出"
   echo "----------------------------------------"
   read -rp "请输入编号: " choice
