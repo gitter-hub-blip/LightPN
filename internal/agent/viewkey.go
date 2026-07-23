@@ -12,8 +12,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 
 	"golang.org/x/crypto/argon2"
 
@@ -148,60 +146,13 @@ func (vk *viewKey) seal(plainJSON []byte) (*proto.ConfEnc, error) {
 	}, nil
 }
 
-// maskRE mirrors MASK_RE in web/app.js — the two MUST stay in sync (same
-// alternatives in the same order) so the agent-side preview masks exactly
-// what the panel would and the click-to-reveal indices line up. Four forms:
-// JSON ("key": "v"), YAML (key: v, trailing (\r?) preserves CRLF files),
-// Caddyfile forward_proxy (basic_auth user pass — masks the password token),
-// and URL userinfo (scheme://user:pass@host — naive configs embed creds in
-// proxy URLs under non-secret keys like "proxy").
-var maskRE = regexp.MustCompile(`(?im)` +
-	`("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\s*:\s*")([^"]*)(")` +
-	`|^([ \t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\s*:[ \t]*)([^#\r\n]+?)(\r?)$` +
-	`|^([ \t]*basic_?auth[ \t]+\S+[ \t]+)(\S+)` +
-	`|(://[^:@/\s"']+:)([^@/\s"']+)(@)`)
-
-const maskDots = "••••••••"
-
-// maskSecrets replaces secret values in a config text with fixed-width dots
-// (no length leak). Regex-based: keys the pattern misses stay in the clear,
-// the same limitation the panel-side masking always had.
-func maskSecrets(text string) string {
-	var b strings.Builder
-	last := 0
-	for _, m := range maskRE.FindAllStringSubmatchIndex(text, -1) {
-		b.WriteString(text[last:m[0]])
-		switch {
-		case m[2] >= 0: // JSON: prefix, value, closing quote
-			b.WriteString(text[m[2]:m[3]])
-			if m[5] > m[4] {
-				b.WriteString(maskDots)
-			}
-			b.WriteString(text[m[6]:m[7]])
-		case m[8] >= 0: // YAML: prefix, value, optional \r
-			b.WriteString(text[m[8]:m[9]])
-			b.WriteString(maskDots)
-			b.WriteString(text[m[12]:m[13]])
-		case m[14] >= 0: // Caddyfile basic_auth: prefix, password token
-			b.WriteString(text[m[14]:m[15]])
-			b.WriteString(maskDots)
-		default: // URL userinfo: "://user:", password, "@"
-			b.WriteString(text[m[18]:m[19]])
-			b.WriteString(maskDots)
-			b.WriteString(text[m[22]:m[23]])
-		}
-		last = m[1]
-	}
-	b.WriteString(text[last:])
-	return b.String()
-}
-
-// sealToolConf wraps a collected conf_result for the wire. With a view
-// password configured it sends a masked plaintext preview (structure visible,
-// secret values dotted out) alongside the full result encrypted in Enc: the
-// panel renders the preview immediately and asks for the password only when
-// a masked value is clicked. Deliberate trade-off vs sealing everything:
-// hub/CDN see config structure (addresses, ports) but not secrets. On a
+// sealToolConf wraps a collected conf_result for the wire. Config contents
+// are viewable ONLY with a view password: without one the reply is just the
+// WG summary plus NoKey (the panel shows how to set a password). With one,
+// the outer payload carries file METADATA (tool/alias, path, size, err — so
+// the panel can draw the service bars before unlock) and the service list;
+// every byte of file content travels solely inside Enc and is decrypted in
+// the operator's browser. hub/CDN never see contents or structure. On a
 // broken view.key it fails closed — an error entry instead of plaintext.
 func (a *Agent) sealToolConf(res proto.ConfResultData) proto.ConfResultData {
 	vk, err := loadViewKey(a.ID.Dir)
@@ -213,24 +164,25 @@ func (a *Agent) sealToolConf(res proto.ConfResultData) proto.ConfResultData {
 		}}}
 	}
 	if vk == nil {
-		return res // no password configured — plain, as before
+		return proto.ConfResultData{WG: res.WG, NoKey: true}
 	}
 	// Registered services ride along on view-password nodes only. They go
-	// into BOTH the sealed payload and the preview: the panel swaps in the
-	// decrypted payload wholesale after unlock, so anything missing from it
-	// would vanish from the page at that moment.
+	// into BOTH the sealed payload and the outer metadata: the panel swaps
+	// in the decrypted payload wholesale after unlock, so anything missing
+	// from it would vanish from the page at that moment.
 	res.Services = a.collectSvcStatus()
 	plain, err := json.Marshal(res)
 	if err == nil {
 		var enc *proto.ConfEnc
 		if enc, err = vk.seal(plain); err == nil {
-			preview := proto.ConfResultData{WG: res.WG, Services: res.Services, Enc: enc}
-			preview.Files = make([]proto.ConfFile, len(res.Files))
+			outer := proto.ConfResultData{WG: res.WG, Services: res.Services, Enc: enc}
+			outer.Files = make([]proto.ConfFile, len(res.Files))
 			for i, f := range res.Files {
-				f.Content = maskSecrets(f.Content)
-				preview.Files[i] = f
+				f.Content = "" // contents live in Enc only
+				f.Truncated = false
+				outer.Files[i] = f
 			}
-			return preview
+			return outer
 		}
 	}
 	a.Log.Error("conf encryption failed", "err", err)

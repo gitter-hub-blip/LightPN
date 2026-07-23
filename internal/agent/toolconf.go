@@ -90,13 +90,13 @@ func (a *Agent) collectToolConf() proto.ConfResultData {
 				if err != nil {
 					msg = err.Error()
 				}
-				out.Files = append(out.Files, proto.ConfFile{Tool: c.tool, Path: c.path, Err: msg})
+				out.Files = append(out.Files, proto.ConfFile{Tool: c.tool, Path: c.path, Err: msg, Registered: true})
 				seen[c.path] = true
 			}
 			continue
 		}
 		seen[c.path] = true
-		f := proto.ConfFile{Tool: c.tool, Path: c.path, ModTime: fi.ModTime().Unix(), Size: fi.Size()}
+		f := proto.ConfFile{Tool: c.tool, Path: c.path, ModTime: fi.ModTime().Unix(), Size: fi.Size(), Registered: c.registered}
 		switch data, err := os.ReadFile(c.path); {
 		case err != nil:
 			f.Err = err.Error()

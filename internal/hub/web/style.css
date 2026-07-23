@@ -136,14 +136,41 @@ canvas { display: block; width: 100%; }
 }
 .empty { color: var(--muted); padding: 30px; text-align: center; }
 
-/* tool config viewer */
-.confhead { display: flex; align-items: center; gap: 10px; margin: 14px 0 6px; font-size: 13px; }
+/* tool config viewer — 横向服务条 */
+.confbar {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  margin-bottom: 8px; overflow: hidden;
+}
+.confbar .cb-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+.confbar .cb-left { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.confbar .cb-name { font-weight: 600; }
+.confbar .cb-mid {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px;
+  color: var(--muted); font-size: 12px;
+}
+.confbar .cb-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.confbar .cb-note { flex-shrink: 0; }
+.confbar .cb-note.bad { color: var(--bad); }
+.confbar .cb-acts { display: flex; gap: 6px; flex-shrink: 0; }
+.confbar .cb-acts button { padding: 4px 12px; font-size: 12.5px; }
+.cb-toggle {
+  flex-shrink: 0; width: 34px; padding: 4px 0; text-align: center; font-size: 14px;
+  transition: transform .2s ease;
+}
+/* 未登记(仅自动探测):状态与操作置灰示意不可用,锁/箭头仍可用 */
+.confbar.dim .cb-name, .confbar.dim .cb-acts button[disabled] { color: var(--muted); }
+.confbar .cb-acts button[disabled] { opacity: .45; cursor: not-allowed; }
+.confbar .cb-acts button[disabled]:hover { border-color: var(--border); }
+.pill.dim { background: rgba(125,143,161,.15); color: var(--muted); }
+/* 展开区:max-height 过渡实现下滑动画;内部 pre 自己滚动 */
+.confbody {
+  max-height: 0; overflow: hidden;
+  transition: max-height .25s ease, padding .25s ease;
+  border-top: 1px solid transparent; padding: 0 14px;
+}
+.confbody.open { max-height: 480px; border-top-color: var(--border); padding: 10px 14px 12px; }
 .confbox {
   background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
   padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 1.5;
-  overflow-x: auto; max-height: 420px; overflow-y: auto; white-space: pre;
+  overflow-x: auto; max-height: 400px; overflow-y: auto; white-space: pre;
 }
-.mask { background: var(--panel2); border: 1px dashed var(--border); border-radius: 4px;
-  padding: 0 6px; cursor: pointer; color: var(--muted); user-select: none; }
-.mask.shown { color: var(--warn); border-style: solid; user-select: text; }
-.mask:hover { border-color: var(--accent); }

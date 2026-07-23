@@ -201,15 +201,20 @@ type RotateCertData struct {
 
 // ConfFile is one network-tool configuration file found on an agent.
 // Content is the raw file text (capped; Truncated set when cut). Err is a
-// per-file read error; a file entry with Err set has empty Content.
+// per-file read error; a file entry with Err set has empty Content. On the
+// wire outside the encrypted envelope only the metadata travels: Content is
+// stripped and ships solely inside ConfResultData.Enc.
 type ConfFile struct {
-	Tool      string `json:"tool"` // xray, sing-box, ...
+	Tool      string `json:"tool"` // xray, sing-box, ... or the svc alias
 	Path      string `json:"path"`
 	ModTime   int64  `json:"mtime"`
 	Size      int64  `json:"size"`
 	Content   string `json:"content,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
 	Err       string `json:"err,omitempty"`
+	// Registered marks a file that came from a svc-registry conf path (Tool
+	// is then the svc alias); false = builtin auto-detection.
+	Registered bool `json:"registered,omitempty"`
 }
 
 // ConfWG is the agent's WireGuard runtime summary. It deliberately carries
@@ -250,17 +255,19 @@ type SvcStatus struct {
 	Enabled string `json:"enabled"` // systemd UnitFileState: enabled/disabled/...
 }
 
-// ConfResultData answers a conf_get: WG runtime state plus every proxy-tool
-// config file auto-detected on the node. When Enc is set the agent has a
-// view password: Files carry a masked preview, the full payload is inside
-// Enc, and Services lists the remotely controllable units (view-password
-// nodes only — without a view key no command can be authenticated, so the
-// service feature stays dark).
+// ConfResultData answers a conf_get. Config contents require a view
+// password: without one (NoKey set) the reply carries only the WG summary —
+// no file contents, no file list, no services. With a view password, Files
+// carry metadata only (tool/alias, path, size, mtime, err — no Content),
+// the full payload including contents is inside Enc, and Services lists the
+// remotely controllable units (without a view key no command can be
+// authenticated, so the service feature stays dark too).
 type ConfResultData struct {
 	WG       ConfWG      `json:"wg"`
 	Files    []ConfFile  `json:"files"`
 	Services []SvcStatus `json:"services,omitempty"`
 	Enc      *ConfEnc    `json:"enc,omitempty"`
+	NoKey    bool        `json:"no_key,omitempty"` // no view password set on the agent
 }
 
 // SvcActionData carries a service command sealed by the operator's BROWSER

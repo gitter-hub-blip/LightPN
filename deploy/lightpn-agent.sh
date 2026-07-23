@@ -127,16 +127,18 @@ prompt_enroll() {
   "$BIN_DST" enroll --hub "$hub" --token "$token" --data-dir "$DATA_DIR"
 }
 
-# 配置查看密码:设置后,面板「拉取配置」看到的是端到端加密的密文,
-# 浏览器端输入本密码解密;hub 与其前置代理(如 CDN)拿不到明文。
+# 配置查看密码:面板查看本机配置的前提 —— 配置内容只以端到端加密的密文
+# 上行,浏览器端输入本密码解密;hub 与其前置代理(如 CDN)拿不到明文。
+# 不设置则面板完全无法查看本机配置,远程开关服务也不激活。
 prompt_view_pass() {
   local ans
   echo "可为本机设置「配置查看密码」:面板查看本机翻墙软件配置时须在浏览器"
   echo "输入该密码解密,hub 与其前面的 CDN 全程只见密文。"
+  echo "不设置则面板无法查看本机配置,远程开关服务也不可用。"
   read -rp "现在设置吗? (y/N): " ans
   case "$ans" in
     y|Y) "$BIN_DST" set-view-pass --data-dir "$DATA_DIR" || warn "设置失败,可稍后在菜单重试。" ;;
-    *)   warn "已跳过。面板将以明文查看配置(仅前端打码);可稍后在菜单设置。" ;;
+    *)   warn "已跳过。面板将无法查看本机配置/远程开关服务;可稍后在菜单设置。" ;;
   esac
 }
 
@@ -276,7 +278,7 @@ do_view_pass() {
       c|C) "$BIN_DST" clear-view-pass --data-dir "$DATA_DIR" ;;
     esac
   else
-    echo -e "当前:${yellow}未设置${plain}(面板明文查看,仅前端打码)。"
+    echo -e "当前:${yellow}未设置${plain}(面板无法查看本机配置,远程开关不可用)。"
     "$BIN_DST" set-view-pass --data-dir "$DATA_DIR"
   fi
 }

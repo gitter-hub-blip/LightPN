@@ -112,7 +112,7 @@ func svcAdd(args []string) {
 		}
 	}
 	if !agent.HasViewKey(*dataDir) {
-		fmt.Println("注意:本机尚未设置配置查看密码(set-view-pass),远程开关不会激活 —— 无密码则指令无法验真。")
+		fmt.Println("注意:本机尚未设置配置查看密码(set-view-pass),配置查看与远程开关都不会激活 —— 无密码则内容无法加密、指令无法验真。")
 	}
 }
 
@@ -191,7 +191,7 @@ func clearViewPass(args []string) {
 	if err := agent.ClearViewPassword(*dataDir); err != nil {
 		fatal("%v", err)
 	}
-	fmt.Println("查看密码已清除;面板拉取配置恢复为明文(前端打码)。")
+	fmt.Println("查看密码已清除;面板将无法查看本机配置,远程开关服务同时停用。")
 }
 
 func enroll(args []string) {

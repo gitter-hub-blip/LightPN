@@ -65,15 +65,16 @@ func TestViewKeyRoundTrip(t *testing.T) {
 	if sealed.Enc == nil {
 		t.Fatal("expected encrypted envelope, got plain")
 	}
-	// Alongside enc travels a masked preview: structure visible, secret
-	// values dotted out. The real secret must not appear anywhere in it.
+	// Alongside enc travels file METADATA only — path/tool for the panel's
+	// service bars. No content byte may appear outside the ciphertext.
 	if len(sealed.Files) != 1 || sealed.WG.Pubkey != "pk" {
-		t.Fatalf("expected masked preview alongside enc, got %+v", sealed)
+		t.Fatalf("expected metadata alongside enc, got %+v", sealed)
 	}
-	if got := sealed.Files[0].Content; strings.Contains(got, "topsecret") {
-		t.Fatalf("secret leaked into preview: %s", got)
-	} else if !strings.Contains(got, maskDots) {
-		t.Fatalf("preview not masked: %s", got)
+	if f := sealed.Files[0]; f.Content != "" || f.Path == "" {
+		t.Fatalf("outer file entry must be metadata-only: %+v", f)
+	}
+	if raw, _ := json.Marshal(sealed); strings.Contains(string(raw), "topsecret") {
+		t.Fatal("secret leaked outside the ciphertext")
 	}
 	if sealed.Enc.KDF != "argon2id" || sealed.Enc.MemKiB != viewMemKiB || sealed.Enc.Time != viewTime {
 		t.Fatalf("bad KDF params on the wire: %+v", sealed.Enc)
@@ -94,17 +95,26 @@ func TestViewKeyRoundTrip(t *testing.T) {
 	}
 }
 
-// TestViewKeyAbsent: no view.key → conf_result passes through unencrypted
-// (the pre-feature behavior).
+// TestViewKeyAbsent: no view.key → config is not viewable at all. The reply
+// carries the WG summary and NoKey; files never leave the agent in plain.
 func TestViewKeyAbsent(t *testing.T) {
 	dir := t.TempDir()
-	plain := proto.ConfResultData{WG: proto.ConfWG{Iface: "lightpn0"}}
+	plain := proto.ConfResultData{
+		WG:    proto.ConfWG{Iface: "lightpn0"},
+		Files: []proto.ConfFile{{Tool: "xray", Content: "SECRET"}},
+	}
 	out := testAgent(dir).sealToolConf(plain)
 	if out.Enc != nil {
 		t.Fatal("encrypted without a view key")
 	}
+	if !out.NoKey {
+		t.Fatal("NoKey not signalled")
+	}
+	if len(out.Files) != 0 {
+		t.Fatalf("files must not ship without a view key: %+v", out.Files)
+	}
 	if out.WG.Iface != "lightpn0" {
-		t.Fatal("plain payload mangled")
+		t.Fatal("WG summary mangled")
 	}
 }
 
@@ -154,50 +164,4 @@ func TestViewKeyCorrupt(t *testing.T) {
 
 func writeCorruptViewKey(dir string) error {
 	return os.WriteFile(viewKeyPath(dir), []byte("{not json"), 0o600)
-}
-
-// TestMaskSecrets: the Go port must mask what web/app.js MASK_RE masks —
-// JSON and YAML forms, CRLF preserved, empty values left empty (index
-// alignment with the panel depends on identical match behavior).
-func TestMaskSecrets(t *testing.T) {
-	cases := []struct{ name, in, want string }{
-		{"json",
-			`{"server":"1.2.3.4","password":"hunter2","method":"aes"}`,
-			`{"server":"1.2.3.4","password":"` + maskDots + `","method":"aes"}`},
-		{"json empty value stays empty",
-			`{"password":""}`,
-			`{"password":""}`},
-		{"yaml",
-			"server: 1.2.3.4\npassword: hunter2\nport: 443\n",
-			"server: 1.2.3.4\npassword: " + maskDots + "\nport: 443\n"},
-		{"yaml crlf preserved",
-			"password: hunter2\r\nport: 443\r\n",
-			"password: " + maskDots + "\r\nport: 443\r\n"},
-		{"yaml list item",
-			"- private_key: abc123\n",
-			"- private_key: " + maskDots + "\n"},
-		{"uuid json",
-			`{"id": "8a7b-uuid-value"}`,
-			`{"id": "` + maskDots + `"}`},
-		{"no secrets untouched",
-			"listen: 0.0.0.0\nmode: tcp\n",
-			"listen: 0.0.0.0\nmode: tcp\n"},
-		{"caddyfile forward_proxy basic_auth",
-			":443 {\n  forward_proxy {\n    basic_auth alice hunter2\n    hide_ip\n  }\n}\n",
-			":443 {\n  forward_proxy {\n    basic_auth alice " + maskDots + "\n    hide_ip\n  }\n}\n"},
-		{"caddy basicauth variant",
-			"basicauth bob JDJhJDE0JEdG\n",
-			"basicauth bob " + maskDots + "\n"},
-		{"url userinfo (naive proxy field)",
-			`{"proxy": "https://user:s3cret@example.com"}`,
-			`{"proxy": "https://user:` + maskDots + `@example.com"}`},
-		{"url without creds untouched",
-			`{"listen": "socks://127.0.0.1:1080"}`,
-			`{"listen": "socks://127.0.0.1:1080"}`},
-	}
-	for _, c := range cases {
-		if got := maskSecrets(c.in); got != c.want {
-			t.Errorf("%s:\n got %q\nwant %q", c.name, got, c.want)
-		}
-	}
 }

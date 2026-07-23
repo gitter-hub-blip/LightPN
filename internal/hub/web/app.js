@@ -12,7 +12,7 @@ const state = {
   links: [],        // GET /api/links
   spark: {},        // nodeId -> [{cpu, rx_rate, tx_rate}] recent heartbeats
   toolconf: null,   // { id, data, loading, err } — survives heartbeat re-renders
-  confShown: new Set(), // indices of currently revealed masked values
+  confOpen: new Set(),  // 展开中的配置条 key(alias 或 auto:路径)
   confKeys: new Map(),  // nodeId -> CryptoKey,查看密码派生密钥的会话内缓存
   svcNames: {},         // alias -> 显示名(hub 侧覆盖,纯装饰)
   ws: null,
@@ -297,7 +297,7 @@ function nodeDetailView(id) {
     <div class="section-title">当前 Peer</div>
     <div id="peer-table"><div class="empty">加载中…</div></div>
     <div class="section-title">网络工具配置</div>
-    <div class="hint" style="margin-bottom:8px">实时从节点读取翻墙软件配置与 WireGuard 运行时状态(不含私钥)。敏感字段默认打码,点击可显示。</div>
+    <div class="hint" style="margin-bottom:8px">实时从节点读取翻墙软件配置与 WireGuard 运行时状态(不含私钥)。配置端到端加密,点 🔒 输入该节点的查看密码在浏览器本地解锁。</div>
     <button id="btn-toolconf" ${n.status === "offline" ? "disabled" : ""}>拉取配置</button>
     <div id="toolconf-out" style="margin-top:10px"></div>
   `);
@@ -525,7 +525,7 @@ function bindNodeDetail(id) {
 
   // Toolconf survives the 15s heartbeat re-render; drop it only when the
   // detail page switches to another node.
-  if (state.toolconf && state.toolconf.id !== id) { state.toolconf = null; state.confShown.clear(); }
+  if (state.toolconf && state.toolconf.id !== id) { state.toolconf = null; state.confOpen.clear(); }
   $("#btn-toolconf").onclick = () => loadToolConf(id);
   renderToolConf();
 
@@ -567,43 +567,9 @@ async function loadNodeDetail(id) {
 }
 
 // ---- tool config (conf_get) ----
-
-// Sensitive values in proxy configs, four forms: JSON ("key": "value"),
-// YAML (key: value), Caddyfile forward_proxy (basic_auth user pass) and
-// URL userinfo (scheme://user:pass@host)。Matched values are masked; click
-// to reveal. 与 internal/agent/viewkey.go 的 maskRE 保持同步 —— 分支相同、
-// 顺序相同(agent 端用它生成加密节点的打码预览,两侧匹配行为一致才能保证
-// 打码位索引对齐)。
-const MASK_RE = new RegExp(
-  '("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\\s*:\\s*")([^"]*)(")'
-  + '|^([ \\t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\\s*:[ \\t]*)([^#\\r\\n]+)$'
-  + '|^([ \\t]*basic_?auth[ \\t]+\\S+[ \\t]+)(\\S+)'
-  + '|(:\\/\\/[^:@\\/\\s"\']+:)([^@\\/\\s"\']+)(@)', "gim");
-
-function maskRender(text) {
-  MASK_RE.lastIndex = 0;
-  let html = "", last = 0, i = 0, m;
-  while ((m = MASK_RE.exec(text))) {
-    html += esc(text.slice(last, m.index));
-    if (m[1] !== undefined) {          // JSON: prefix, value, closing quote
-      html += esc(m[1]) + maskSpan(m[2], i++) + esc(m[3]);
-    } else if (m[4] !== undefined) {   // YAML: prefix, value
-      html += esc(m[4]) + maskSpan(m[5], i++);
-    } else if (m[6] !== undefined) {   // Caddyfile basic_auth: prefix, password
-      html += esc(m[6]) + maskSpan(m[7], i++);
-    } else {                           // URL userinfo: "://user:", password, "@"
-      html += esc(m[8]) + maskSpan(m[9], i++) + esc(m[10]);
-    }
-    last = m.index + m[0].length;
-  }
-  return html + esc(text.slice(last));
-}
-
-function maskSpan(v, i) {
-  if (!v) return "";
-  const shown = state.confShown.has(i);
-  return `<span class="mask${shown ? " shown" : ""}" data-v="${esc(v)}" data-i="${i}" title="点击显示/隐藏">${shown ? esc(v) : "••••••••"}</span>`;
-}
+// 配置内容一律锁在查看密码后:agent 无密码时只回 WG 摘要(no_key),有
+// 密码时外层只有文件元数据(工具/别名、路径、大小、错误)与服务状态,
+// 全部内容在 enc 密文里,解锁纯在浏览器本地。
 
 // ---- end-to-end encrypted conf (agent view password) ----
 // data.enc = { kdf, m_kib, t, p, salt, nonce, ct }:agent 用查看密码的
@@ -685,36 +651,73 @@ function svcStatePill(active) {
   return `<span class="pill ${cls}">${esc(active || "unknown")}</span>`;
 }
 
-function renderSvcCard(d) {
-  const svcs = d.services;
-  if (!svcs || !svcs.length) return "";
+// confBars 把服务列表与文件元数据拼成横向条模型:
+//   登记服务   → { key: alias, label: 显示名, svc, file? }
+//   自动探测文件 → { key: "auto:路径", label: 工具名, file, auto: true }
+// 服务与文件靠 file.registered && file.tool === alias 关联。
+function confBars(d) {
+  const svcs = d.services || [];
+  const files = d.files || [];
   const names = state.svcNames || {};
-  // 孤儿显示名:hub 上还留着、但 agent 当前别名集合里已没有的。agent 端
-  // 删别名后 hub 不会被通知,这些残留只能显式清理。
-  const live = new Set(svcs.map(s => s.alias));
-  const orphans = Object.keys(names).filter(a => !live.has(a));
-  let html = `<div class="confhead" style="margin-top:16px"><span class="pill online">远程开关</span>
-    <span class="hint">指令在浏览器用查看密码加密,hub 只转发密文</span></div>`;
-  if (orphans.length) {
-    html += `<div class="hint" style="color:#c60;margin-bottom:8px">
-      检测到 ${orphans.length} 个失效显示名(对应别名已在节点上删除):${esc(orphans.join("、"))}
-      <a href="#" id="svc-prune"> 清理</a></div>`;
+  const fileByAlias = {};
+  const auto = [];
+  for (const f of files) {
+    if (f.registered) fileByAlias[f.tool] = f;
+    else auto.push(f);
   }
-  for (const s of svcs) {
-    const label = names[s.alias] || s.alias;
-    html += `<div class="card" style="margin-bottom:8px">
-      <div class="kv">
-        <span class="k">${esc(label)} ${svcStatePill(s.active)}
-          <a href="#" class="hint svc-rename" data-alias="${esc(s.alias)}">重命名</a></span>
-        <span class="v">
-          <button class="svc-act" data-alias="${esc(s.alias)}" data-action="start">启动</button>
-          <button class="svc-act" data-alias="${esc(s.alias)}" data-action="restart">重启</button>
-          <button class="svc-act danger" data-alias="${esc(s.alias)}" data-action="stop">停止</button>
-        </span>
-      </div>
+  const bars = svcs.map(s => ({
+    key: s.alias, label: names[s.alias] || s.alias, svc: s, file: fileByAlias[s.alias],
+  }));
+  for (const f of files) {
+    if (f.registered && !svcs.some(s => s.alias === f.tool)) {
+      bars.push({ key: f.tool, label: names[f.tool] || f.tool, file: f });
+    }
+  }
+  for (const f of auto) bars.push({ key: "auto:" + f.path, label: f.tool, file: f, auto: true });
+  return bars;
+}
+
+// 单根条:左=显示名+状态,中=路径/备注,右=启动|重启|停止,最右=锁/箭头。
+// unlocked 后锁变箭头,点击下滑展开配置全文;未登记(auto)条状态与操作
+// 置灰,仅可解锁查看。
+function confBarHTML(bar, unlocked) {
+  const f = bar.file;
+  const open = state.confOpen.has(bar.key);
+  const left = bar.auto
+    ? `<span class="cb-name">${esc(bar.label)}</span><span class="pill dim">–</span>`
+    : `<span class="cb-name">${esc(bar.label)}</span>${svcStatePill(bar.svc ? bar.svc.active : "")}
+       <a href="#" class="hint svc-rename" data-alias="${esc(bar.key)}">重命名</a>`;
+  let mid = "";
+  if (f) mid = `<span class="mono cb-path" title="${esc(f.path)}">${esc(f.path)}</span>`;
+  if (bar.auto) mid += `<span class="cb-note">未登记,仅可查看</span>`;
+  if (f && f.err) mid += `<span class="cb-note bad">读取失败:${esc(f.err)}</span>`;
+  const acts = bar.auto || !bar.svc
+    ? `<button disabled>启动</button><button disabled>重启</button><button disabled>停止</button>`
+    : `<button class="svc-act" data-alias="${esc(bar.key)}" data-action="start">启动</button>
+       <button class="svc-act" data-alias="${esc(bar.key)}" data-action="restart">重启</button>
+       <button class="svc-act danger" data-alias="${esc(bar.key)}" data-action="stop">停止</button>`;
+  let toggle = "";
+  if (f && !f.err) {
+    toggle = unlocked
+      ? `<button class="cb-toggle${open ? " open" : ""}" data-toggle="${esc(bar.key)}" title="展开/折叠配置">${open ? "▾" : "▸"}</button>`
+      : `<button class="cb-toggle" data-unlock="${esc(bar.key)}" title="输入查看密码解锁">🔒</button>`;
+  }
+  let body = "";
+  if (f && !f.err && unlocked) {
+    body = `<div class="confbody${open ? " open" : ""}" data-body="${esc(bar.key)}">
+      <pre class="confbox">${esc(f.content || "")}</pre>
+      <div class="hint">${fmtBytes(f.size)} · 修改于 ${fmtAgo(f.mtime)}${f.truncated ? " · 已截断" : ""} · 鼠标移出自动折叠</div>
     </div>`;
   }
-  return html;
+  return `<div class="confbar${bar.auto ? " dim" : ""}">
+    <div class="cb-row">
+      <div class="cb-left">${left}</div>
+      <div class="cb-mid">${mid}</div>
+      <div class="cb-acts">${acts}</div>
+      ${toggle}
+    </div>
+    ${body}
+  </div>`;
 }
 
 // 用会话内缓存的 view key 加密 {action, alias, ts};无缓存则弹密码框
@@ -756,7 +759,7 @@ async function doSvcAction(id, action, alias) {
   } catch (e) { toast(e.message); }
 }
 
-function bindSvcCard(id) {
+function bindConfBars(id) {
   const prune = $("#svc-prune");
   if (prune) prune.onclick = async e => {
     e.preventDefault();
@@ -793,17 +796,35 @@ function bindSvcCard(id) {
       } catch (err) { toast(err.message); }
     };
   });
+  // 锁:解锁该节点(解锁成功后所有条的锁都变箭头,并展开触发的那条)。
+  document.querySelectorAll("[data-unlock]").forEach(btn => {
+    btn.onclick = () => unlockToolConf(btn.dataset.unlock);
+  });
+  // 箭头:展开/折叠。折叠展开只改 class(CSS 过渡动画),不重建 DOM。
+  const setOpen = (key, open) => {
+    const body = document.querySelector(`[data-body="${CSS.escape(key)}"]`);
+    const tog = document.querySelector(`[data-toggle="${CSS.escape(key)}"]`);
+    if (!body) return;
+    if (open) state.confOpen.add(key); else state.confOpen.delete(key);
+    body.classList.toggle("open", open);
+    if (tog) { tog.classList.toggle("open", open); tog.textContent = open ? "▾" : "▸"; }
+  };
+  document.querySelectorAll("[data-toggle]").forEach(btn => {
+    btn.onclick = () => setOpen(btn.dataset.toggle, !state.confOpen.has(btn.dataset.toggle));
+  });
+  // 鼠标移出配置文本区 → 自动折叠;再点箭头可重新展开,无需再输密码。
+  document.querySelectorAll("[data-body]").forEach(el => {
+    el.onmouseleave = () => { if (state.confOpen.has(el.dataset.body)) setOpen(el.dataset.body, false); };
+  });
 }
 
 async function loadToolConf(id) {
   try { state.svcNames = await api("GET", `/api/nodes/${id}/svcnames`); }
   catch { state.svcNames = {}; }
   state.toolconf = { id, loading: true };
-  state.confShown.clear();
+  state.confOpen.clear();
   renderToolConf();
   try {
-    // data.enc 存在时不在此处解密:agent 同时发来了打码预览(files 里
-    // 敏感值已替换为 ••),直接展示;点击打码处才走 unsealConf 解锁。
     const data = await api("GET", `/api/nodes/${id}/toolconf`);
     state.toolconf = { id, data };
   } catch (e) {
@@ -812,19 +833,19 @@ async function loadToolConf(id) {
   renderToolConf();
 }
 
-// 解锁加密节点的完整配置:解密成功后用明文替换预览并重新渲染,
-// revealIdx(可选)为触发解锁的那个打码位,解锁后直接显示它。
-async function unlockToolConf(revealIdx) {
+// 解锁:浏览器本地解密完整配置,成功后用明文数据整体替换(enc 保留供
+// 服务指令继续加密下发),所有条的锁变箭头;openKey 为触发解锁的那根条,
+// 解锁后直接展开它。
+async function unlockToolConf(openKey) {
   const tc = state.toolconf;
   if (!tc || !tc.data || !tc.data.enc) return;
   try {
     const plain = await unsealConf(tc.id, tc.data.enc);
-    // 保留 enc(供服务命令继续加密下发)并标记已解锁(不再显示打码提示)。
     plain.enc = tc.data.enc;
     plain.unlocked = true;
     state.toolconf = { id: tc.id, data: plain };
-    state.confShown.clear();
-    if (revealIdx !== undefined) state.confShown.add(revealIdx);
+    state.confOpen.clear();
+    if (openKey !== undefined) state.confOpen.add(openKey);
     renderToolConf();
   } catch (e) { toast(e.message); }
 }
@@ -842,37 +863,42 @@ function renderToolConf() {
     <div class="kv"><span class="k">本机公钥</span><span class="v">${esc(wg.pubkey || "–")}</span></div>
     <div class="kv"><span class="k">内核 Peer 数</span><span class="v">${(wg.peers || []).length}</span></div>
   </div>`;
+
+  // 未设查看密码:配置与远程开关整体不可用(agent 根本不回传)。
+  if (d.no_key) {
+    html += `<div class="empty">该节点未设置配置查看密码,配置查看与远程开关不可用。<br>
+      在节点上运行部署脚本菜单「配置查看密码」或 <span class="mono">lightpn-agent set-view-pass</span> 设置后重新拉取。</div>`;
+    out.innerHTML = html;
+    return;
+  }
+
   const files = d.files || [];
-  const encrypted = d.enc && !d.unlocked; // 仍处于打码预览态
-  if (encrypted && files.length) {
-    html += `<div class="hint" style="margin-bottom:10px">🔒 该节点已启用配置查看密码:下方为打码预览,敏感值端到端加密 —— 点击任一 •••••••• 输入密码解密。</div>`;
+  // 旧版 agent 兼容:仍明文回传(无 enc 但文件带内容)→ 提示升级,内容
+  // 当作已解锁展示。
+  const legacy = !d.enc && files.some(f => f.content);
+  if (legacy) {
+    html += `<div class="hint" style="color:#c60;margin-bottom:8px">该节点 agent 版本较旧,仍在明文回传配置 —— 请升级 agent 二进制后重启服务。</div>`;
   }
-  if (!files.length) {
-    // 注意:密文里装的和预览是同一份数据,files 为空时输密码解开也是空 ——
-    // 所以这里不提供“解锁”入口,直接说明原因与出路。
-    html += `<div class="empty">节点上未检测到配置文件:内置常见路径(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks / mihomo / clash / caddy / naiveproxy)均未命中。
-      配置在其他位置时,可在节点上运行部署脚本菜单「远程开关服务」(或 <span class="mono">lightpn-agent svc-add</span>)登记 unit + 配置文件路径,登记后重新拉取即可显示。</div>`;
+  const unlocked = !!d.unlocked || legacy;
+
+  const bars = confBars(d);
+  if (!bars.length) {
+    html += `<div class="empty">节点上未检测到配置文件:内置常见路径(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks / mihomo / clash / caddy / naiveproxy)均未命中,也没有登记服务。
+      可在节点上运行部署脚本菜单「远程开关服务」(或 <span class="mono">lightpn-agent svc-add</span>)登记 unit + 配置文件路径,登记后重新拉取。</div>`;
+  } else {
+    const names = state.svcNames || {};
+    const live = new Set((d.services || []).map(s => s.alias));
+    const orphans = Object.keys(names).filter(a => !live.has(a));
+    if (orphans.length) {
+      html += `<div class="hint" style="color:#c60;margin-bottom:8px">
+        检测到 ${orphans.length} 个失效显示名(对应别名已在节点上删除):${esc(orphans.join("、"))}
+        <a href="#" id="svc-prune"> 清理</a></div>`;
+    }
+    html += `<div class="hint" style="margin-bottom:8px">操作指令在浏览器用查看密码加密后经 hub 转发密文;配置全文仅在本浏览器解密。</div>`;
+    for (const bar of bars) html += confBarHTML(bar, unlocked);
   }
-  for (const f of files) {
-    html += `<div class="confhead"><span class="pill online">${esc(f.tool)}</span>
-      <span class="mono">${esc(f.path)}</span>
-      <span class="hint">${fmtBytes(f.size)} · 修改于 ${fmtAgo(f.mtime)}${f.truncated ? " · 已截断" : ""}</span></div>`;
-    html += f.err
-      ? `<div class="empty">读取失败:${esc(f.err)}</div>`
-      : `<pre class="confbox">${maskRender(f.content || "")}</pre>`;
-  }
-  html += renderSvcCard(d);
   out.innerHTML = html;
-  bindSvcCard(tc.id);
-  out.querySelectorAll(".mask").forEach(el => {
-    el.onclick = () => {
-      const i = Number(el.dataset.i);
-      // 仍处于加密预览:点击打码位即触发密码解锁,而非本地显示。
-      if (tc.data && tc.data.enc && !tc.data.unlocked) { unlockToolConf(i); return; }
-      if (state.confShown.has(i)) { state.confShown.delete(i); el.classList.remove("shown"); el.textContent = "••••••••"; }
-      else { state.confShown.add(i); el.classList.add("shown"); el.textContent = el.dataset.v; }
-    };
-  });
+  bindConfBars(tc.id);
 }
 
 function bindLinks() {
