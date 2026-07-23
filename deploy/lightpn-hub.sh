@@ -81,7 +81,17 @@ do_install() {
   else
     local d
     read -rp "安装目录 (回车使用默认 $APP_DIR): " d
-    [ -n "$d" ] && set_paths "$d"
+    if [ -n "$d" ]; then
+      # systemd 要求 ExecStart/ReadWritePaths 为绝对路径;规整用户输入,
+      # 否则相对路径会生成 systemd 拒绝的坏 unit。
+      d="${d/#\~/$HOME}"
+      case "$d" in
+        /*) : ;;
+        *)  d="$(pwd)/$d" ;;
+      esac
+      d="$(realpath -m "$d" 2>/dev/null || echo "$d")"
+      set_paths "$d"
+    fi
   fi
 
   # 二进制:默认取脚本同目录下的 lightpn-hub

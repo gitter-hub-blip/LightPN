@@ -147,7 +147,19 @@ do_install() {
   else
     local d
     read -rp "安装目录 (回车使用默认 $APP_DIR): " d
-    [ -n "$d" ] && set_paths "$d"
+    if [ -n "$d" ]; then
+      # systemd 的 ExecStart/ReadWritePaths 要求绝对路径。用户可能输入相对
+      # 路径(如 "1")或含 ~ 的路径,统一规整为绝对路径,否则会生成
+      # ExecStart=1/lightpn-agent 这种 systemd 拒绝的坏 unit。
+      d="${d/#\~/$HOME}"                       # 展开开头的 ~
+      case "$d" in
+        /*) : ;;                               # 已是绝对路径
+        *)  d="$(pwd)/$d" ;;                    # 相对路径 → 相对当前目录转绝对
+      esac
+      # 折叠多余的 . 和尾部斜杠(realpath -m 不要求路径已存在)
+      d="$(realpath -m "$d" 2>/dev/null || echo "$d")"
+      set_paths "$d"
+    fi
   fi
 
   # 二进制:默认取脚本同目录下的 lightpn-agent
