@@ -307,7 +307,8 @@ func (a *Agent) dispatch(conn net.Conn, env *proto.Envelope) error {
 	case proto.TypeConfGet:
 		// Panel-triggered read of local network-tool configs (§6.2). The
 		// reply reuses the request ID so the hub can match its waiter.
-		res, err := proto.NewEnvelope(proto.TypeConfResult, env.ID, a.collectToolConf())
+		// sealToolConf encrypts end-to-end when a view password is set.
+		res, err := proto.NewEnvelope(proto.TypeConfResult, env.ID, a.sealToolConf(a.collectToolConf()))
 		if err != nil {
 			return err
 		}

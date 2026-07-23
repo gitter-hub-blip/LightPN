@@ -220,11 +220,32 @@ type ConfWG struct {
 	Peers      []WGPeerStatus `json:"peers"`
 }
 
+// ConfEnc is the end-to-end-encrypted form of a conf_result, produced when
+// the agent has a view password configured. CT is AES-256-GCM ciphertext of
+// the plain ConfResultData JSON; the key is Argon2id(view password, Salt)
+// with the given parameters, derived once on the agent at password-set time
+// and re-derived in the operator's browser at view time. The hub and any
+// proxy in front of it only ever see this envelope — the password and the
+// derived key never leave the agent and the browser.
+type ConfEnc struct {
+	KDF    string `json:"kdf"`   // "argon2id"
+	MemKiB uint32 `json:"m_kib"` // Argon2 memory cost, KiB
+	Time   uint32 `json:"t"`     // Argon2 iterations
+	Par    uint8  `json:"p"`     // Argon2 parallelism
+	Salt   string `json:"salt"`  // base64 std
+	Nonce  string `json:"nonce"` // base64 std, 12-byte GCM nonce
+	// CT is base64(AES-256-GCM(gzip(plain JSON))). The gzip step keeps the
+	// base64-inflated envelope under the 1 MiB frame cap even at confTotalCap.
+	CT string `json:"ct"`
+}
+
 // ConfResultData answers a conf_get: WG runtime state plus every proxy-tool
-// config file auto-detected on the node.
+// config file auto-detected on the node. When Enc is set the agent has a
+// view password: WG/Files are zero and the real payload is inside Enc.
 type ConfResultData struct {
 	WG    ConfWG     `json:"wg"`
 	Files []ConfFile `json:"files"`
+	Enc   *ConfEnc   `json:"enc,omitempty"`
 }
 
 type ErrorData struct {

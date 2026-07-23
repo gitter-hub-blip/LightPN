@@ -127,6 +127,19 @@ prompt_enroll() {
   "$BIN_DST" enroll --hub "$hub" --token "$token" --data-dir "$DATA_DIR"
 }
 
+# 配置查看密码:设置后,面板「拉取配置」看到的是端到端加密的密文,
+# 浏览器端输入本密码解密;hub 与其前置代理(如 CDN)拿不到明文。
+prompt_view_pass() {
+  local ans
+  echo "可为本机设置「配置查看密码」:面板查看本机翻墙软件配置时须在浏览器"
+  echo "输入该密码解密,hub 与其前面的 CDN 全程只见密文。"
+  read -rp "现在设置吗? (y/N): " ans
+  case "$ans" in
+    y|Y) "$BIN_DST" set-view-pass --data-dir "$DATA_DIR" || warn "设置失败,可稍后在菜单重试。" ;;
+    *)   warn "已跳过。面板将以明文查看配置(仅前端打码);可稍后在菜单设置。" ;;
+  esac
+}
+
 do_install() {
   # 安装目录:首次安装可自定义,已安装则沿用 unit 中的目录做升级
   if installed; then
@@ -200,6 +213,7 @@ do_install() {
       y|Y) prompt_enroll || { warn "入网失败,可稍后在菜单选「入网」重试。"; return 1; } ;;
       *)   warn "已跳过入网。之后在菜单选「入网」完成。"; return 0 ;;
     esac
+    prompt_view_pass
   fi
 
   echo "==> 启动服务"
@@ -213,7 +227,25 @@ do_enroll() {
   installed || { err "尚未安装,请先执行「安装」。"; return 1; }
   enrolled && { err "本机已入网($DATA_DIR 非空);如需重新入网,先「完全卸载」。"; return 1; }
   prompt_enroll || return 1
+  prompt_view_pass
   systemctl enable --now "$SERVICE" && ok "已启动。" || err "启动失败"
+}
+
+do_view_pass() {
+  installed || { err "尚未安装,请先执行「安装」。"; return 1; }
+  enrolled  || { err "尚未入网,身份目录为空。"; return 1; }
+  local ans
+  if [ -f "$DATA_DIR/view.key" ]; then
+    echo -e "当前:${green}已设置${plain}配置查看密码。"
+    read -rp "重设(r)/清除(c)/取消(回车): " ans
+    case "$ans" in
+      r|R) "$BIN_DST" set-view-pass --data-dir "$DATA_DIR" ;;
+      c|C) "$BIN_DST" clear-view-pass --data-dir "$DATA_DIR" ;;
+    esac
+  else
+    echo -e "当前:${yellow}未设置${plain}(面板明文查看,仅前端打码)。"
+    "$BIN_DST" set-view-pass --data-dir "$DATA_DIR"
+  fi
 }
 
 do_uninstall() {
@@ -281,6 +313,7 @@ while true; do
   echo -e "  ${blue}7.${plain} 查看最近日志"
   echo -e "  ${blue}8.${plain} 实时跟踪日志(Ctrl+C 返回菜单)"
   echo -e "  ${blue}9.${plain} 完全卸载"
+  echo -e "  ${blue}10.${plain} 配置查看密码(设置/重设/清除)"
   echo -e "  ${blue}0.${plain} 退出"
   echo "----------------------------------------"
   read -rp "请输入编号: " choice
@@ -288,6 +321,7 @@ while true; do
   case "$choice" in
     1) do_install; pause ;;
     2) do_enroll; pause ;;
+    10) do_view_pass; pause ;;
     3) systemctl start "$SERVICE" && ok "已启动" || err "启动失败"; pause ;;
     4) systemctl stop "$SERVICE" && ok "已停止" || err "停止失败"; pause ;;
     5) systemctl restart "$SERVICE" && ok "已重启" || err "重启失败"; pause ;;

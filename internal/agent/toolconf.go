@@ -27,6 +27,9 @@ var toolConfCandidates = []struct{ tool, path string }{
 	{"hysteria", "/etc/hysteria/config.yaml"},
 	{"hysteria", "/etc/hysteria/config.json"},
 	{"trojan-go", "/etc/trojan-go/config.json"},
+	{"shadowsocks-rust", "/etc/shadowsocks-rust/config.json"},
+	{"shadowsocks-rust", "/usr/local/etc/shadowsocks-rust/config.json"},
+	{"shadowsocks", "/etc/shadowsocks/config.json"},
 	{"mihomo", "/etc/mihomo/config.yaml"},
 	{"clash", "/etc/clash/config.yaml"},
 }

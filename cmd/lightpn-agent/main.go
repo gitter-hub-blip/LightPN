@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/gitter-hub-blip/lightpn/internal/agent"
 )
 
@@ -21,11 +23,61 @@ func isLoopback(host string) bool {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "enroll" {
-		enroll(os.Args[2:])
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "enroll":
+			enroll(os.Args[2:])
+			return
+		case "set-view-pass":
+			setViewPass(os.Args[2:])
+			return
+		case "clear-view-pass":
+			clearViewPass(os.Args[2:])
+			return
+		}
 	}
 	run(os.Args[1:])
+}
+
+// setViewPass configures the conf-view password: panel conf_get replies are
+// end-to-end encrypted with a key derived from it (decrypted in the
+// operator's browser; hub and any fronting proxy see only ciphertext).
+func setViewPass(args []string) {
+	fs := flag.NewFlagSet("set-view-pass", flag.ExitOnError)
+	dataDir := fs.String("data-dir", agent.DefaultDataDir(), "identity directory")
+	fs.Parse(args)
+	fmt.Fprint(os.Stderr, "配置查看密码(面板查看本机配置时输入,hub 无法解密): ")
+	p1, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		fatal("read password: %v", err)
+	}
+	fmt.Fprint(os.Stderr, "再输入一次确认: ")
+	p2, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		fatal("read password: %v", err)
+	}
+	if string(p1) != string(p2) {
+		fatal("两次输入不一致")
+	}
+	if len(p1) == 0 {
+		fatal("密码不能为空(取消加密请用 clear-view-pass)")
+	}
+	if err := agent.SetViewPassword(*dataDir, string(p1)); err != nil {
+		fatal("%v", err)
+	}
+	fmt.Println("查看密码已设置;面板拉取配置将端到端加密,浏览器端输入该密码解密。")
+}
+
+func clearViewPass(args []string) {
+	fs := flag.NewFlagSet("clear-view-pass", flag.ExitOnError)
+	dataDir := fs.String("data-dir", agent.DefaultDataDir(), "identity directory")
+	fs.Parse(args)
+	if err := agent.ClearViewPassword(*dataDir); err != nil {
+		fatal("%v", err)
+	}
+	fmt.Println("查看密码已清除;面板拉取配置恢复为明文(前端打码)。")
 }
 
 func enroll(args []string) {

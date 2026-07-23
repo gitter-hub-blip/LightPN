@@ -13,6 +13,7 @@ const state = {
   spark: {},        // nodeId -> [{cpu, rx_rate, tx_rate}] recent heartbeats
   toolconf: null,   // { id, data, loading, err } — survives heartbeat re-renders
   confShown: new Set(), // indices of currently revealed masked values
+  confKeys: new Map(),  // nodeId -> CryptoKey,查看密码派生密钥的会话内缓存
   ws: null,
   wsUp: false,
   route: location.hash || "#/nodes",
@@ -518,6 +519,8 @@ async function loadNodeDetail(id) {
 
 // Sensitive keys in proxy configs, JSON ("key": "value") and YAML
 // (key: value) forms. Matched values are masked; click to reveal.
+// 与 internal/agent/viewkey.go 的 maskRE 保持同步(agent 端用它生成加密
+// 节点的打码预览,两侧匹配行为一致才能保证打码位索引对齐)。
 const MASK_RE = /("(?:privatekey|private_key|password|passwd|secret|secret_key|uuid|psk|token|auth|pass|id)"\s*:\s*")([^"]*)(")|^([ \t-]*(?:private[_-]?key|password|passwd|secret(?:[_-]key)?|uuid|psk|token|auth(?:[_-]str)?|pass)\s*:[ \t]*)([^#\r\n]+)$/gim;
 
 function maskRender(text) {
@@ -541,17 +544,102 @@ function maskSpan(v, i) {
   return `<span class="mask${shown ? " shown" : ""}" data-v="${esc(v)}" data-i="${i}" title="点击显示/隐藏">${shown ? esc(v) : "••••••••"}</span>`;
 }
 
+// ---- end-to-end encrypted conf (agent view password) ----
+// data.enc = { kdf, m_kib, t, p, salt, nonce, ct }:agent 用查看密码的
+// Argon2id 派生密钥做 AES-256-GCM(密文内层是 gzip(JSON))。hub 只转发
+// 密文;这里在浏览器本地重新派生并解密,密码不发往任何服务器。
+
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+async function deriveConfKey(password, enc) {
+  const raw = await hashwasm.argon2id({
+    password, salt: b64(enc.salt),
+    iterations: enc.t, memorySize: enc.m_kib, parallelism: enc.p,
+    hashLength: 32, outputType: "binary",
+  });
+  return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+}
+
+async function decryptConf(key, enc) {
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(enc.nonce) }, key, b64(enc.ct));
+  const unzipped = await new Response(
+    new Blob([pt]).stream().pipeThrough(new DecompressionStream("gzip"))
+  ).arrayBuffer();
+  return JSON.parse(new TextDecoder().decode(unzipped));
+}
+
+// 密码弹框;resolve 为输入串,取消时 resolve null。
+function passwordModal(hint) {
+  return new Promise(resolve => {
+    const mask = showModal(`
+      <h2>配置查看密码</h2>
+      <p class="hint">该节点的配置已端到端加密(hub 无法解密)。请输入部署时设置的查看密码,解密仅在本浏览器进行。</p>
+      ${hint ? `<p class="hint" style="color:#c60">${esc(hint)}</p>` : ""}
+      <input type="password" id="vp" placeholder="查看密码" autocomplete="off" style="width:100%">
+      <div class="actions">
+        <button id="cancel">取消</button>
+        <button class="primary" id="ok">解密</button>
+      </div>`);
+    const input = $("#vp", mask);
+    input.focus();
+    const done = v => { mask.remove(); resolve(v); };
+    $("#cancel", mask).onclick = () => done(null);
+    $("#ok", mask).onclick = () => done(input.value);
+    input.onkeydown = e => { if (e.key === "Enter") done(input.value); };
+    mask.addEventListener("click", e => { if (e.target === mask) resolve(null); });
+  });
+}
+
+// 解密循环:先试会话内缓存的密钥,失败(或无缓存)则提示输入,密码错误
+// (GCM 校验失败)时带提示重试。成功后缓存密钥,本会话内不再询问。
+async function unsealConf(id, enc) {
+  if (typeof hashwasm === "undefined") throw new Error("argon2 模块未加载,请刷新页面");
+  const cached = state.confKeys.get(id);
+  if (cached) {
+    try { return await decryptConf(cached, enc); }
+    catch { state.confKeys.delete(id); } // 密码已在 agent 侧改过
+  }
+  let hint = "";
+  for (;;) {
+    const pw = await passwordModal(hint);
+    if (pw === null) throw new Error("已取消解密");
+    if (!pw) { hint = "密码不能为空。"; continue; }
+    const key = await deriveConfKey(pw, enc);
+    try {
+      const plain = await decryptConf(key, enc);
+      state.confKeys.set(id, key);
+      return plain;
+    } catch { hint = "密码错误(解密校验失败),请重试。"; }
+  }
+}
+
 async function loadToolConf(id) {
   state.toolconf = { id, loading: true };
   state.confShown.clear();
   renderToolConf();
   try {
+    // data.enc 存在时不在此处解密:agent 同时发来了打码预览(files 里
+    // 敏感值已替换为 ••),直接展示;点击打码处才走 unsealConf 解锁。
     const data = await api("GET", `/api/nodes/${id}/toolconf`);
     state.toolconf = { id, data };
   } catch (e) {
     state.toolconf = { id, err: e.message };
   }
   renderToolConf();
+}
+
+// 解锁加密节点的完整配置:解密成功后用明文替换预览并重新渲染,
+// revealIdx(可选)为触发解锁的那个打码位,解锁后直接显示它。
+async function unlockToolConf(revealIdx) {
+  const tc = state.toolconf;
+  if (!tc || !tc.data || !tc.data.enc) return;
+  try {
+    const plain = await unsealConf(tc.id, tc.data.enc);
+    state.toolconf = { id: tc.id, data: plain };
+    state.confShown.clear();
+    if (revealIdx !== undefined) state.confShown.add(revealIdx);
+    renderToolConf();
+  } catch (e) { toast(e.message); }
 }
 
 function renderToolConf() {
@@ -567,9 +655,14 @@ function renderToolConf() {
     <div class="kv"><span class="k">本机公钥</span><span class="v">${esc(wg.pubkey || "–")}</span></div>
     <div class="kv"><span class="k">内核 Peer 数</span><span class="v">${(wg.peers || []).length}</span></div>
   </div>`;
+  if (d.enc) {
+    html += `<div class="hint" style="margin-bottom:10px">🔒 该节点已启用配置查看密码:下方为打码预览,敏感值端到端加密 —— 点击任一 •••••••• 输入密码解密。</div>`;
+  }
   const files = d.files || [];
   if (!files.length) {
-    html += `<div class="empty">未在常见路径检测到翻墙软件配置(xray / sing-box / v2ray / hysteria / trojan-go / mihomo / clash)。</div>`;
+    html += d.enc
+      ? `<div class="empty"><a href="#" id="conf-unlock">配置已加密,点击输入查看密码解锁</a></div>`
+      : `<div class="empty">未在常见路径检测到翻墙软件配置(xray / sing-box / v2ray / hysteria / trojan-go / shadowsocks-rust / mihomo / clash)。</div>`;
   }
   for (const f of files) {
     html += `<div class="confhead"><span class="pill online">${esc(f.tool)}</span>
@@ -580,9 +673,13 @@ function renderToolConf() {
       : `<pre class="confbox">${maskRender(f.content || "")}</pre>`;
   }
   out.innerHTML = html;
+  const unlock = $("#conf-unlock", out);
+  if (unlock) unlock.onclick = e => { e.preventDefault(); unlockToolConf(); };
   out.querySelectorAll(".mask").forEach(el => {
     el.onclick = () => {
       const i = Number(el.dataset.i);
+      // 仍处于加密预览:点击打码位即触发密码解锁,而非本地显示。
+      if (tc.data && tc.data.enc) { unlockToolConf(i); return; }
       if (state.confShown.has(i)) { state.confShown.delete(i); el.classList.remove("shown"); el.textContent = "••••••••"; }
       else { state.confShown.add(i); el.classList.add("shown"); el.textContent = el.dataset.v; }
     };

@@ -405,5 +405,5 @@ CREATE TABLE ip_cooldown (
 | `ack` | A→H | 对推送的统一回执 |
 | `kick` | H→A | 清 peer、毁身份、退出 |
 | `rotate_wg` / `rotate_cert` | H→A | 密钥/证书轮换 |
-| `conf_get` / `conf_result` | H→A / A→H | 面板触发的工具配置读取:agent 回传 WG 运行时摘要(无私钥)与自动探测到的翻墙软件配置文件(路径白名单内嵌于 agent,不接受下发路径) |
+| `conf_get` / `conf_result` | H→A / A→H | 面板触发的工具配置读取:agent 回传 WG 运行时摘要(无私钥)与自动探测到的翻墙软件配置文件(路径白名单内嵌于 agent,不接受下发路径)。agent 设有查看密码(`view.key`)时,payload 为「打码预览(敏感值→••,与面板 MASK_RE 同步的 maskRE 识别)+ `enc` 信封(Argon2id 派生密钥对 gzip(完整明文 JSON) 做 AES-256-GCM)」:面板先渲染预览,点击打码位才在浏览器解密;hub 只透传,看得到结构、看不到敏感值 |
 | `error` | 双向 | 统一错误,含错误码 |
