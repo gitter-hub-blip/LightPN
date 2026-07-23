@@ -61,10 +61,11 @@ func (a *Agent) collectToolConf() proto.ConfResultData {
 		tool, path string
 		registered bool
 	}
+	// Registered paths scan FIRST: when a registry entry and a builtin
+	// candidate name the same file, the file belongs to the service (the
+	// panel draws one bar per service, keyed by the registered flag +
+	// alias). Builtins only pick up paths no service has claimed.
 	cands := make([]candidate, 0, len(toolConfCandidates)+4)
-	for _, c := range toolConfCandidates {
-		cands = append(cands, candidate{c.tool, c.path, false})
-	}
 	if a.ID != nil {
 		if reg, err := LoadSvcReg(a.ID.Dir); err == nil {
 			for _, e := range reg {
@@ -76,9 +77,12 @@ func (a *Agent) collectToolConf() proto.ConfResultData {
 			a.Log.Warn("services.json unreadable, registered conf paths skipped", "err", err)
 		}
 	}
+	for _, c := range toolConfCandidates {
+		cands = append(cands, candidate{c.tool, c.path, false})
+	}
 
 	total := 0
-	seen := map[string]bool{} // paths already emitted (registry may repeat a builtin)
+	seen := map[string]bool{} // paths already emitted (a builtin may repeat a registered one)
 	for _, c := range cands {
 		if seen[c.path] {
 			continue

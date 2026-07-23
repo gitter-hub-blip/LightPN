@@ -660,10 +660,13 @@ function confBars(d) {
   const files = d.files || [];
   const names = state.svcNames || {};
   const fileByAlias = {};
+  const claimed = new Set(); // 登记文件占用的路径:同路径不再出灰条(防旧版 agent 重复发)
   const auto = [];
   for (const f of files) {
-    if (f.registered) fileByAlias[f.tool] = f;
-    else auto.push(f);
+    if (f.registered) { fileByAlias[f.tool] = f; claimed.add(f.path); }
+  }
+  for (const f of files) {
+    if (!f.registered && !claimed.has(f.path)) auto.push(f);
   }
   const bars = svcs.map(s => ({
     key: s.alias, label: names[s.alias] || s.alias, svc: s, file: fileByAlias[s.alias],

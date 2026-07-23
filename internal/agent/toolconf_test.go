@@ -53,8 +53,10 @@ func TestCollectToolConf(t *testing.T) {
 // TestCollectToolConfRegistered: svc-registry entries with a conf path are
 // read like builtin candidates (tool = alias); a registered-but-unreadable
 // path yields an Err entry instead of a silent skip — the operator promised
-// that path, so its failure must be visible. A registered duplicate of a
-// builtin path that was already served is not emitted twice.
+// that path, so its failure must be visible. When a builtin candidate names
+// the same file as a registry entry, the file belongs to the SERVICE (one
+// bar per .service on the panel): the registered entry wins, the builtin is
+// skipped, and the path is never emitted twice.
 func TestCollectToolConfRegistered(t *testing.T) {
 	dir := t.TempDir()
 	caddyfile := filepath.Join(dir, "Caddyfile")
@@ -83,12 +85,18 @@ func TestCollectToolConfRegistered(t *testing.T) {
 	a := &Agent{ID: &Identity{Dir: idDir}, WG: &fakeWG{}, Log: slog.New(slog.NewTextHandler(os.Stderr, nil))}
 	res := a.collectToolConf()
 	if len(res.Files) != 2 {
-		t.Fatalf("want 2 files (builtin + missing registered), got %d: %+v", len(res.Files), res.Files)
+		t.Fatalf("want 2 files (registered claims the builtin path + missing registered), got %d: %+v", len(res.Files), res.Files)
 	}
-	if f := res.Files[0]; f.Tool != "caddy" || !strings.Contains(f.Content, "basic_auth") {
-		t.Fatalf("bad builtin entry: %+v", f)
-	}
-	if f := res.Files[1]; f.Tool != "gone" || f.Err == "" || f.Content != "" {
+	// saveSvcReg sorts by alias: "gone" scans before "naive".
+	if f := res.Files[0]; f.Tool != "gone" || !f.Registered || f.Err == "" || f.Content != "" {
 		t.Fatalf("missing registered path must surface an Err entry: %+v", f)
+	}
+	if f := res.Files[1]; f.Tool != "naive" || !f.Registered || !strings.Contains(f.Content, "basic_auth") {
+		t.Fatalf("registered entry must claim the file (not the builtin): %+v", f)
+	}
+	for _, f := range res.Files {
+		if f.Tool == "caddy" {
+			t.Fatalf("builtin duplicate of a registered path must be skipped: %+v", f)
+		}
 	}
 }
