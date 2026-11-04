@@ -9,7 +9,7 @@
 
 ## 构建
 
-需要 Go ≥ 1.26(以 `go.mod` 声明为准)。纯 Go、免 CGO,可任意交叉编译:
+需要 Go ≥ 1.26.2(以 `go.mod` 声明为准)。纯 Go、免 CGO,可任意交叉编译:
 
 ```sh
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/lightpn-hub   ./cmd/lightpn-hub
@@ -58,6 +58,35 @@ hub 不参与数据面,无需放行任何 UDP 端口。`cloudflared` 只向 Clou
 WG 端口用脚本安装的「WG 端口」选项或 `--wg-port <N>` 自定义,放行对应的 `N/udp` 即可;hub 会向对端通告 `<本机公网IP>:<N>`,故该端口必须原样公网可达。link 状态 `degraded` 最常见的原因就是这里没放行。
 
 出站方向:agent 需能主动连到 hub 的 `7440/tcp` 以及对端 agent 的 WG UDP 端口;默认放行出站的防火墙无需额外配置。
+
+## Linux TCP 安全更新(CVE-2026-98432)
+
+此漏洞位于 Linux 内核的 IPv4 TCP 处理路径。已公开的远程代码执行利用涉及 MPTCP 监听;
+Go 1.24 起默认对 Linux TCP 监听启用 MPTCP。TLS/mTLS 认证发生在 TCP 建连之后,
+不能阻止这一内核层攻击。参见 [Go 官方讨论与安全公告链接](https://github.com/golang/go/issues/82717)。
+
+LightPN 的 Hub 控制通道、Web API 和 Agent SOCKS5 监听均显式调用
+`net.ListenConfig.SetMultipathTCP(false)`,即使运行环境设置了 `GODEBUG=multipathtcp=1`
+也保持普通 TCP。`go.mod` 同时设置 `godebug multipathtcp=0` 作为其他默认网络路径的补充保护。
+WireGuard 的 UDP 数据面不受此配置影响。
+
+**必须重新编译、替换二进制并重启对应服务,代码修改才会生效。** 这只是程序层缓解,
+不能修复底层内核漏洞,也不保护同机的其他程序。Hub 和 Agent 主机仍应安装发行版针对
+CVE-2026-98432 提供的内核安全更新,并重启进入修复后的内核;仅升级 Go 不能替代此步骤。
+
+暂时无法替换旧二进制时,可为已安装的服务设置运行环境,例如在 Hub 主机执行
+`sudo systemctl edit lightpn-hub.service`,写入:
+
+```ini
+[Service]
+Environment="GODEBUG=multipathtcp=0"
+```
+
+然后执行 `sudo systemctl daemon-reload` 和 `sudo systemctl restart lightpn-hub.service`。
+Agent 主机对 `lightpn-agent.service` 同样操作。若服务已有其他 `GODEBUG` 项,
+请保留它们并以逗号追加或替换 `multipathtcp=0`,不要保留重复且冲突的值。
+重启会重建监听;Agent 重启还会触发 WG 密钥轮换与重新撮合,应安排短暂维护窗口。
+此临时设置同样不能代替内核更新。
 
 ## 从零到三节点(runbook)
 
