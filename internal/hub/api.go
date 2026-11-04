@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"embed"
@@ -21,6 +22,7 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"github.com/gitter-hub-blip/lightpn/internal/proto"
+	"github.com/gitter-hub-blip/lightpn/internal/transport"
 )
 
 //go:embed web
@@ -141,12 +143,17 @@ func (h *Hub) ServeAPI(stop <-chan struct{}) error {
 	mux.Handle("/", http.FileServer(http.FS(sub)))
 
 	srv := &http.Server{Addr: h.Cfg.APIAddr, Handler: mux}
+	ln, err := transport.ListenTCP(context.Background(), srv.Addr)
+	if err != nil {
+		return err
+	}
+	defer ln.Close()
 	go func() {
 		<-stop
 		srv.Close()
 	}()
 	h.Log.Info("admin API listening", "addr", h.Cfg.APIAddr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
