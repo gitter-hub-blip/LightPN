@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gitter-hub-blip/lightpn/internal/proto"
+	"github.com/gitter-hub-blip/lightpn/internal/transport"
 )
 
 // ackRef ties an in-flight push to the link/side it will confirm.
@@ -73,10 +75,12 @@ func (h *Hub) ServeControl(stop <-chan struct{}) error {
 		ClientAuth: tls.VerifyClientCertIfGiven,
 		MinVersion: tls.VersionTLS13,
 	}
-	ln, err := tls.Listen("tcp", h.Cfg.ControlAddr, tlsCfg)
+	tcpLn, err := transport.ListenTCP(context.Background(), h.Cfg.ControlAddr)
 	if err != nil {
 		return err
 	}
+	ln := tls.NewListener(tcpLn, tlsCfg)
+	defer ln.Close()
 	h.mu.Lock()
 	h.controlBound = ln.Addr().String()
 	h.mu.Unlock()

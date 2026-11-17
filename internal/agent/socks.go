@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gitter-hub-blip/lightpn/internal/transport"
 	"golang.org/x/net/proxy"
 )
 
@@ -161,7 +162,7 @@ func (ec *ExitController) Serve(ctx context.Context, listenAddr string) error {
 	var ln net.Listener
 	var err error
 	for i := 0; i < 50; i++ {
-		if ln, err = net.Listen("tcp", listenAddr); err == nil {
+		if ln, err = transport.ListenTCP(ctx, listenAddr); err == nil {
 			break
 		}
 		select {
@@ -173,6 +174,7 @@ func (ec *ExitController) Serve(ctx context.Context, listenAddr string) error {
 	if err != nil {
 		return err
 	}
+	defer ln.Close()
 	ec.log.Info("exit SOCKS5 listening", "addr", ln.Addr())
 	go func() {
 		<-ctx.Done()

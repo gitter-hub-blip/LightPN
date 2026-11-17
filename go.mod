@@ -2,6 +2,9 @@ module github.com/gitter-hub-blip/lightpn
 
 go 1.26.2
 
+// Defense in depth for CVE-2026-98432; hosts still need a patched kernel.
+godebug multipathtcp=0
+
 require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/oklog/ulid/v2 v2.1.1
